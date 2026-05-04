@@ -1,21 +1,13 @@
 """Stripe payments: booking checkout, status polling, webhook.
 
-Uses emergentintegrations for checkout creation/status (works with sk_test_emergent
-proxied key in test mode; in live mode replace with real sk_live_*).
-Uses direct stripe library to retrieve PaymentIntent ID after a successful payment
-so refunds work in live mode.
+Replaced emergentintegrations with direct stripe library calls for 
+standard compatibility.
 """
 import asyncio
 import json as _json
 import logging
 
 import stripe
-from emergentintegrations.payments.stripe.checkout import (
-    StripeCheckout,
-    CheckoutSessionRequest,
-    CheckoutSessionResponse,
-    CheckoutStatusResponse,
-)
 from fastapi import APIRouter, HTTPException, Request
 
 from db import db, get_settings, STRIPE_API_KEY, STRIPE_WEBHOOK_SECRET
@@ -28,13 +20,12 @@ stripe.api_key = STRIPE_API_KEY
 
 
 async def _retrieve_payment_intent_id(session_id: str) -> str | None:
-    """Best-effort retrieval of PaymentIntent id (works in live mode with real key).
-    Returns None if Stripe call fails (e.g., test proxy doesn't expose this)."""
+    """Retrieves PaymentIntent id from a checkout session."""
     try:
         s = await asyncio.to_thread(stripe.checkout.Session.retrieve, session_id)
-        return s.get('payment_intent') if isinstance(s, dict) else getattr(s, 'payment_intent', None)
+        return s.get('payment_intent')
     except Exception as e:
-        logging.info(f"PaymentIntent retrieval skipped (test mode or error): {e}")
+        logging.info(f"PaymentIntent retrieval error: {e}")
         return None
 
 
@@ -70,7 +61,7 @@ async def create_booking_checkout(payload: BookingCreate, request: Request):
     settings = await get_settings()
 
     amount = pricing['total'] if payload.payment_choice == 'full' else pricing['deposit_amount']
-    amount = float(round(amount, 2))
+    amount_cents = int(round(amount * 100)) # Stripe uses cents
 
     booking = Booking(
         guest_name=payload.guest_name,
@@ -99,29 +90,38 @@ async def create_booking_checkout(payload: BookingCreate, request: Request):
             await db.subscribers.insert_one(sub.model_dump())
 
     host_url = payload.origin_url.rstrip('/')
-    webhook_url = f"{str(request.base_url).rstrip('/')}/api/webhook/stripe"
-    stripe_checkout = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
     success_url = f"{host_url}/payment/success?session_id={{CHECKOUT_SESSION_ID}}"
     cancel_url = f"{host_url}/payment/cancel"
-    req = CheckoutSessionRequest(
-        amount=amount,
-        currency='eur',
-        success_url=success_url,
-        cancel_url=cancel_url,
-        metadata={
-            'booking_id': booking.id,
-            'payment_choice': payload.payment_choice,
-            'guest_email': payload.guest_email,
-        },
-    )
+    
     try:
-        session: CheckoutSessionResponse = await stripe_checkout.create_checkout_session(req)
+        session = await asyncio.to_thread(
+            stripe.checkout.Session.create,
+            payment_method_types=['card'],
+            line_items=[{
+                'price_data': {
+                    'currency': 'eur',
+                    'product_data': {
+                        'name': f"Soggiorno presso {settings.get('villa_name','Light Blue')}",
+                    },
+                    'unit_amount': amount_cents,
+                },
+                'quantity': 1,
+            }],
+            mode='payment',
+            success_url=success_url,
+            cancel_url=cancel_url,
+            metadata={
+                'booking_id': booking.id,
+                'payment_choice': payload.payment_choice,
+                'guest_email': payload.guest_email,
+            },
+        )
     except Exception as e:
         logging.exception('Stripe session create failed')
         raise HTTPException(500, f'Errore creazione pagamento: {e}')
 
     tx = PaymentTransaction(
-        session_id=session.session_id,
+        session_id=session.id,
         booking_id=booking.id,
         amount=amount,
         currency='eur',
@@ -133,7 +133,7 @@ async def create_booking_checkout(payload: BookingCreate, request: Request):
 
     return {
         'url': session.url,
-        'session_id': session.session_id,
+        'session_id': session.id,
         'booking_id': booking.id,
         'amount': amount,
     }
@@ -148,26 +148,26 @@ async def payment_status(session_id: str, request: Request):
     if tx.get('payment_status') == 'paid':
         return {'payment_status': 'paid', 'status': tx.get('status', 'complete'), 'booking_id': tx.get('booking_id')}
 
-    webhook_url = f"{str(request.base_url).rstrip('/')}/api/webhook/stripe"
-    stripe_checkout = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
     try:
-        status: CheckoutStatusResponse = await stripe_checkout.get_checkout_status(session_id)
+        session = await asyncio.to_thread(stripe.checkout.Session.retrieve, session_id)
+        p_status = 'paid' if session.payment_status == 'paid' else 'unpaid'
+        status = session.status # 'open', 'complete', or 'expired'
     except Exception as e:
-        logging.warning(f"Stripe status retrieval failed (cached): {e}")
+        logging.warning(f"Stripe status retrieval failed: {e}")
         return {'payment_status': tx.get('payment_status', 'initiated'), 'status': tx.get('status', 'open'), 'booking_id': tx.get('booking_id')}
 
     await db.payment_transactions.update_one(
         {'session_id': session_id},
-        {'$set': {'status': status.status, 'payment_status': status.payment_status}},
+        {'$set': {'status': status, 'payment_status': p_status}},
     )
 
-    if status.payment_status == 'paid' and tx.get('payment_status') != 'paid':
+    if p_status == 'paid' and tx.get('payment_status') != 'paid':
         choice = tx.get('metadata', {}).get('payment_choice', 'deposit')
         await _on_payment_paid(session_id, choice, tx.get('booking_id'))
 
     return {
-        'payment_status': status.payment_status,
-        'status': status.status,
+        'payment_status': p_status,
+        'status': status,
         'booking_id': tx.get('booking_id'),
     }
 
@@ -176,34 +176,16 @@ async def payment_status(session_id: str, request: Request):
 async def stripe_webhook(request: Request):
     body = await request.body()
     sig = request.headers.get('Stripe-Signature', '')
-    webhook_url = f"{str(request.base_url).rstrip('/')}/api/webhook/stripe"
 
-    # Try emergentintegrations webhook first (matches its checkout flow)
-    stripe_checkout = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
-    try:
-        resp = await stripe_checkout.handle_webhook(body, sig)
-        tx = await db.payment_transactions.find_one({'session_id': resp.session_id}, {'_id': 0})
-        if tx:
-            await db.payment_transactions.update_one(
-                {'session_id': resp.session_id},
-                {'$set': {'payment_status': resp.payment_status}},
-            )
-            if resp.payment_status == 'paid' and tx.get('payment_status') != 'paid':
-                choice = tx.get('metadata', {}).get('payment_choice', 'deposit')
-                await _on_payment_paid(resp.session_id, choice, tx['booking_id'])
-        return {'received': True}
-    except Exception as e:
-        logging.warning(f'Emergent webhook parse failed, trying direct stripe: {e}')
-
-    # Fallback: parse with direct stripe library (for live mode with secret)
     try:
         if STRIPE_WEBHOOK_SECRET:
             event = stripe.Webhook.construct_event(body, sig, STRIPE_WEBHOOK_SECRET)
         else:
             event = _json.loads(body)
-        etype = event.get('type') if isinstance(event, dict) else event['type']
-        data = (event.get('data', {}).get('object', {}) if isinstance(event, dict)
-                else event['data']['object'])
+        
+        etype = event['type']
+        data = event['data']['object']
+        
         if etype in ('checkout.session.completed', 'checkout.session.async_payment_succeeded'):
             session_id = data.get('id')
             tx = await db.payment_transactions.find_one({'session_id': session_id}, {'_id': 0})
