@@ -17,8 +17,6 @@ async def ical_sync_run():
         ('booking', s.get('ical_booking_url', '')),
     ]
     imported = 0
-    
-    # Prepariamo una lista per i nuovi ID importati
     new_external_ids = []
 
     for src, url in urls:
@@ -42,7 +40,7 @@ async def ical_sync_run():
                         if not dtstart or not dtend:
                             continue
 
-                        # Estraiamo la data indipendentemente se è datetime o date pura
+                        # Estrazione robusta della data (gestisce sia datetime che date pura)
                         start = dtstart.dt
                         end = dtend.dt
 
@@ -54,10 +52,12 @@ async def ical_sync_run():
                         uid = str(comp.get('uid', uuid.uuid4()))
                         booking_id = f"ext-{src}-{uid}"
 
+                        # Usiamo un'email che superi la validazione (evitando .invalid)
+                        # Il formato sync-airbnb-1@dominio.it è perfetto per il database
                         booking = Booking(
                             id=booking_id,
-                            guest_name=f"External ({src})",
-                            guest_email=f"{src}@external.invalid",
+                            guest_name=f"Ospite {src.capitalize()}",
+                            guest_email=f"sync-{src}-{imported}@lightblue-anguillara.it",
                             check_in=start.isoformat(),
                             check_out=end.isoformat(),
                             total_price=0,
@@ -82,8 +82,7 @@ async def ical_sync_run():
         except Exception as e:
             logging.exception(f'Errore critico durante sync iCal per {src}: {e}')
 
-    # Pulizia: Rimuoviamo solo le prenotazioni esterne che NON sono presenti nel nuovo scaricamento
-    # Questo evita di avere "doppioni" o mantenere eventi cancellati su Airbnb
+    # Pulizia: eliminiamo solo le vecchie prenotazioni esterne non più presenti nel file
     if imported > 0 or any(url for _, url in urls):
         await db.bookings.delete_many({
             'source': {'$in': ['airbnb', 'booking']}, 
@@ -91,7 +90,7 @@ async def ical_sync_run():
             'id': {'$nin': new_external_ids}
         })
 
-    # Aggiorniamo le impostazioni globali con il risultato
+    # Aggiornamento statistiche nel database
     await db.settings.update_one(
         {'id': 'global'},
         {'$set': {
@@ -100,5 +99,5 @@ async def ical_sync_run():
         }},
     )
     
-    logging.info(f"Sincronizzazione completata: {imported} eventi totali.")
+    logging.info(f"Sincronizzazione completata con successo: {imported} eventi.")
     return {'imported': imported, 'at': datetime.now(timezone.utc).isoformat()}
