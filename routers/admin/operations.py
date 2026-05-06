@@ -15,7 +15,7 @@ from pricing import daterange
 
 router = APIRouter()
 
-# Configurazione Cloudinary usando le variabili che hai messo su Railway
+# Configurazione Cloudinary usando le variabili d'ambiente
 cloudinary.config(
     cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
     api_key=os.getenv("CLOUDINARY_API_KEY"),
@@ -88,12 +88,13 @@ async def ical_sync(admin=Depends(get_current_admin)):
     return await ical_sync_run()
 
 
-# --- NUOVE FUNZIONI PER LA GESTIONE IMMAGINI ---
+# --- GESTIONE GALLERIA IMMAGINI ---
 
 @router.get("/admin/gallery", response_model=List[GalleryImage])
 async def list_gallery_images(admin=Depends(get_current_admin)):
     """Recupera la lista di tutte le immagini salvate nel database."""
-    images = await db.gallery.find().sort("order", 1).to_list(1000)
+    # Usiamo {'_id': 0} per far sì che Pydantic usi il nostro campo 'id'
+    images = await db.gallery.find({}, {'_id': 0}).sort("order", 1).to_list(1000)
     return images
 
 
@@ -112,7 +113,7 @@ async def upload_gallery_image(
             folder="light_blue_gallery"
         )
         
-        # 2. Crea l'oggetto immagine per il nostro database
+        # 2. Crea l'oggetto immagine (l'ID viene generato automaticamente dal modello)
         new_image = GalleryImage(
             url=upload_result['secure_url'],
             public_id=upload_result['public_id'],
@@ -121,8 +122,8 @@ async def upload_gallery_image(
             order=0
         )
         
-        # 3. Salva nel database (collezione 'gallery')
-        await db.gallery.insert_one(new_image.model_dump(by_alias=True))
+        # 3. Salva nel database
+        await db.gallery.insert_one(new_image.model_dump())
         return new_image
         
     except Exception as e:
@@ -141,8 +142,9 @@ async def update_image_info(
         raise HTTPException(400, "Nessun campo da aggiornare")
         
     result = await db.gallery.find_one_and_update(
-        {"_id": image_id},
+        {"id": image_id},
         {"$set": patch},
+        projection={'_id': 0},
         return_document=True
     )
     if not result:
@@ -153,17 +155,17 @@ async def update_image_info(
 @router.delete("/admin/gallery/{image_id}")
 async def delete_gallery_image(image_id: str, admin=Depends(get_current_admin)):
     """Elimina l'immagine dal database e fisicamente da Cloudinary."""
-    # 1. Trova l'immagine nel DB per avere il public_id
-    image = await db.gallery.find_one({"_id": image_id})
+    # 1. Trova l'immagine nel DB
+    image = await db.gallery.find_one({"id": image_id})
     if not image:
         raise HTTPException(404, "Immagine non trovata nel database")
         
     try:
-        # 2. Elimina da Cloudinary usando il public_id
+        # 2. Elimina da Cloudinary
         cloudinary.uploader.destroy(image['public_id'])
         
         # 3. Elimina dal database
-        await db.gallery.delete_one({"_id": image_id})
+        await db.gallery.delete_one({"id": image_id})
         
         return {"status": "success", "message": "Immagine eliminata correttamente"}
     except Exception as e:
