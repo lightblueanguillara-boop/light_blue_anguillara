@@ -196,3 +196,21 @@ class SettingsUpdate(BaseModel):
     last_minute_discount_percent: Optional[float] = None
     last_minute_title: Optional[str] = None
     last_minute_subtitle: Optional[str] = None
+
+
+# ---------- Gallery & Image Management ----------
+
+class GalleryImage(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    url: str                # L'indirizzo dell'immagine su Cloudinary
+    public_id: str          # ID interno di Cloudinary (serve per eliminarla)
+    caption: Optional[str] = ""
+    category: Literal['gallery', 'home', 'rooms', 'general'] = 'general'
+    order: int = 0
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+class GalleryImageUpdate(BaseModel):
+    """Campi che l'admin può modificare per un'immagine già caricata."""
+    caption: Optional[str] = None
+    category: Optional[Literal['gallery', 'home', 'rooms', 'general']] = None
+    order: Optional[int] = None
