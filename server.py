@@ -8,6 +8,7 @@ import logging
 import os
 import uuid
 from datetime import datetime, timezone
+from typing import List  # Aggiunto per la galleria
 
 from dotenv import load_dotenv
 from fastapi import APIRouter, FastAPI
@@ -16,7 +17,7 @@ from starlette.middleware.cors import CORSMiddleware
 from auth import hash_pwd
 from db import db, get_settings, ICAL_SYNC_INTERVAL_HOURS
 from ical_service import ical_sync_run
-from models import VillaSettings
+from models import VillaSettings, GalleryImage  # Aggiunto GalleryImage
 from routers.admin import router as admin_router
 from routers.payments import router as payments_router
 from routers.public import router as public_router
@@ -64,7 +65,9 @@ async def on_startup():
         ]}
         await db.settings.update_one({'id': 'global'}, {'$set': migrate}, upsert=True)
     # Background iCal scheduler
-    asyncio.create_task(_ical_scheduler_loop())
+    async def _start_scheduler():
+        asyncio.create_task(_ical_scheduler_loop())
+    await _start_scheduler()
 
 
 async def _ical_scheduler_loop():
@@ -84,6 +87,15 @@ async def _ical_scheduler_loop():
 async def shutdown_db_client():
     from db import client
     client.close()
+
+
+# --- NUOVA ROTTA PUBBLICA PER LA GALLERIA ---
+
+@app.get("/api/gallery", response_model=List[GalleryImage])
+async def get_public_gallery():
+    """Recupera le immagini della galleria per il sito pubblico."""
+    images = await db.gallery.find().sort("order", 1).to_list(1000)
+    return images
 
 
 logging.basicConfig(
