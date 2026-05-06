@@ -150,10 +150,9 @@ class RefundRequest(BaseModel):
     reason: Optional[str] = None
 
 
-# ---------- Update models (PATCH safety: explicit fields, no arbitrary dict) ----------
+# ---------- Update models (PATCH safety) ----------
 
 class BookingUpdate(BaseModel):
-    """Whitelisted fields the admin may PATCH on a booking."""
     status: Optional[Literal['pending', 'confirmed', 'cancelled', 'external']] = None
     payment_status: Optional[Literal['unpaid', 'deposit_paid', 'fully_paid', 'refunded']] = None
     cancellation_policy: Optional[Literal['flexible', 'moderate', 'strict']] = None
@@ -177,7 +176,6 @@ class MessageUpdate(BaseModel):
 
 
 class SettingsUpdate(BaseModel):
-    """All VillaSettings fields as Optional, for safe PATCH-style PUT."""
     default_price_per_night: Optional[float] = None
     deposit_percent: Optional[float] = None
     default_cancellation_policy: Optional[Literal['flexible', 'moderate', 'strict']] = None
@@ -202,12 +200,13 @@ class SettingsUpdate(BaseModel):
 
 class GalleryImage(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    url: str                # L'indirizzo dell'immagine su Cloudinary
-    public_id: str          # ID interno di Cloudinary (serve per eliminarla)
+    url: str                # L'indirizzo dell'immagine (es. Cloudinary)
+    public_id: str          # ID interno per eliminazione/gestione remota
     caption: Optional[str] = ""
     category: Literal['gallery', 'home', 'rooms', 'general'] = 'general'
-    order: int = 0
+    order: int = 0          # Per gestire la sequenza di visualizzazione
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
 
 class GalleryImageUpdate(BaseModel):
     """Campi che l'admin può modificare per un'immagine già caricata."""
