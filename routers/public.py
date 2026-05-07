@@ -1,7 +1,7 @@
-"""Public routes: villa info, availability, contact, newsletter, iCal export."""
+"""Public routes: villa info, availability, contact, newsletter, iCal export, and Gallery."""
 import asyncio
 from datetime import datetime, timezone, timedelta
-from typing import Optional
+from typing import Optional, List # Aggiunto List
 
 from fastapi import APIRouter, HTTPException, Response
 from icalendar import Calendar, Event
@@ -9,7 +9,7 @@ from pydantic import EmailStr
 
 from db import db, get_settings, ADMIN_NOTIFY_EMAIL
 from email_helpers import send_email_async, email_admin_contact_notification_html
-from models import ContactMessage, ContactCreate, Subscriber
+from models import ContactMessage, ContactCreate, Subscriber, GalleryImage # Aggiunto GalleryImage
 from pricing import compute_stay_pricing, dates_available, daterange
 
 router = APIRouter()
@@ -35,6 +35,14 @@ async def villa_info():
         'deposit_percent': s.get('deposit_percent'),
         'default_cancellation_policy': s.get('default_cancellation_policy'),
     }
+
+# --- NUOVA ROTTA GALLERIA PUBBLICA ---
+@router.get("/gallery", response_model=List[GalleryImage])
+async def public_gallery():
+    """Recupera le immagini della galleria per il sito pubblico (senza autenticazione)."""
+    # Leggiamo dal DB ordinando per il campo 'order'
+    images = await db.gallery.find({}, {'_id': 0}).sort("order", 1).to_list(1000)
+    return images
 
 
 @router.get("/availability")
@@ -91,9 +99,6 @@ async def subscribe(email: EmailStr, name: Optional[str] = None, consent: bool =
 
 @router.get("/villa/last-minute")
 async def last_minute():
-    """Public endpoint that returns next available date ranges within the
-    last_minute_window_days, plus discount config. Returns enabled=False if
-    the admin has not toggled it on."""
     s = await get_settings()
     if not s.get('last_minute_enabled'):
         return {'enabled': False}
@@ -108,7 +113,6 @@ async def last_minute():
         for d in daterange(b['check_in'], b['check_out']):
             if today <= d <= end:
                 blocked.add(d)
-    # Build contiguous free ranges of >=2 days
     ranges = []
     cur_start = None
     cur_prev = None
