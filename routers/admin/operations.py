@@ -24,7 +24,7 @@ cloudinary.config(
 
 @router.get("/admin/analytics")
 async def analytics(admin=Depends(get_current_admin)):
-    # Recuperiamo tutte le prenotazioni che hanno uno stato rilevante
+    # 1. Recupero tutte le prenotazioni confermate o in attesa
     bookings = await db.bookings.find(
         {'status': {'$in': ['confirmed', 'pending']}}, {'_id': 0}
     ).to_list(10000)
@@ -32,50 +32,58 @@ async def analytics(admin=Depends(get_current_admin)):
     now = datetime.now(timezone.utc)
     months = []
     
-    # Prepariamo la struttura per gli ultimi 12 mesi (per i grafici)
+    # 2. Genero la lista degli ultimi 12 mesi per i grafici
+    # Partiamo dal mese corrente e andiamo a ritroso
     for i in range(11, -1, -1):
-        # Calcolo corretto del primo giorno del mese per evitare errori con mesi di durata diversa
-        first_of_current = now.replace(day=1)
-        m = (first_of_current - timedelta(days=i*30)).replace(day=1)
+        # Calcolo del mese: sottraiamo i giorni in modo dinamico
+        # Usiamo il primo giorno del mese corrente come base
+        base_date = now.replace(day=1)
+        # Sottraiamo circa i mesi (i * 30 giorni) e resettiamo al giorno 1
+        m_date = (base_date - timedelta(days=i*30)).replace(day=1)
+        
         months.append({
-            'year': m.year, 
-            'month': m.month, 
-            'label': m.strftime('%b %Y'),
+            'year': m_date.year, 
+            'month': m_date.month, 
+            'label': m_date.strftime('%b %Y'),
             'nights': 0, 
             'revenue': 0.0,
         })
 
-    # Usiamo una variabile separata per il totale globale, 
-    # così contiamo i soldi anche se la prenotazione è fuori dal range dei 12 mesi
     total_revenue_accumulated = 0.0
 
+    # 3. Elaborazione di ogni prenotazione
     for b in bookings:
         try:
-            # Convertiamo le date da stringa a oggetto date
-            check_in_dt = datetime.strptime(b['check_in'], '%Y-%m-%d').date()
-            check_out_dt = datetime.strptime(b['check_out'], '%Y-%m-%d').date()
+            check_in_str = b['check_in']
+            check_out_str = b['check_out']
             
+            check_in_dt = datetime.strptime(check_in_str, '%Y-%m-%d').date()
+            check_out_dt = datetime.strptime(check_out_str, '%Y-%m-%d').date()
+            
+            # Calcolo notti totali e prezzo
             nights_total = max(1, (check_out_dt - check_in_dt).days)
-            
-            # FIX: Convertiamo esplicitamente il prezzo in float (numero decimale)
             price_val = float(b.get('total_price', 0))
             nightly_rate = price_val / nights_total
             
-            # Sommiamo al totale generale (quello che vedi nel quadratino in alto a sinistra)
+            # Incremento il totale globale (indipendente dalle date del grafico)
             total_revenue_accumulated += price_val
 
-            # Distribuiamo il valore nei singoli mesi per popolare il grafico
-            for d in daterange(b['check_in'], b['check_out']):
+            # 4. Distribuzione nei mesi del grafico
+            # daterange restituisce ogni singolo giorno tra check-in e check-out
+            for d in daterange(check_in_str, check_out_str):
                 for mm in months:
+                    # Se il giorno 'd' ricade nell'anno e mese dell'elemento del grafico
                     if d.year == mm['year'] and d.month == mm['month']:
                         mm['nights'] += 1
                         mm['revenue'] += round(nightly_rate, 2)
+                        
         except Exception as e:
-            # Se una prenotazione ha dati corrotti, la saltiamo senza bloccare tutto il server
-            print(f"Errore processamento prenotazione: {e}")
+            print(f"Errore calcolo analytics per prenotazione: {e}")
             continue
 
-    total_nights = sum(m['nights'] for m in months)
+    # Il totale notti mostrato sarà la somma di quelle rientrate nel periodo del grafico
+    total_nights_in_range = sum(m['nights'] for m in months)
+    
     confirmed_count = sum(1 for b in bookings if b['status'] == 'confirmed')
     pending_count = sum(1 for b in bookings if b['status'] == 'pending')
     messages_new = await db.contact_messages.count_documents({'status': 'new'})
@@ -85,7 +93,7 @@ async def analytics(admin=Depends(get_current_admin)):
         'monthly': months,
         'totals': {
             'revenue': round(total_revenue_accumulated, 2),
-            'nights': total_nights,
+            'nights': total_nights_in_range,
             'confirmed_bookings': confirmed_count,
             'pending_bookings': pending_count,
             'new_messages': messages_new,
@@ -108,7 +116,7 @@ async def update_admin_settings(updates: SettingsUpdate, admin=Depends(get_curre
 async def ical_sync(admin=Depends(get_current_admin)):
     return await ical_sync_run()
 
-# --- GESTIONE GALLERIA IMMAGINI (ADMIN) ---
+# --- GESTIONE GALLERIA ---
 
 @router.get("/admin/gallery", response_model=List[GalleryImage])
 async def list_gallery_images(admin=Depends(get_current_admin)):
@@ -134,7 +142,7 @@ async def upload_gallery_image(
         await db.gallery.insert_one(new_image.model_dump())
         return new_image
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Errore durante l'upload: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Errore upload: {str(e)}")
 
 @router.patch("/admin/gallery/{image_id}", response_model=GalleryImage)
 async def update_image_info(image_id: str, updates: GalleryImageUpdate, admin=Depends(get_current_admin)):
