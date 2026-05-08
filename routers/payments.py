@@ -25,12 +25,11 @@ async def _retrieve_payment_intent_id(session_id: str) -> str | None:
         # Recupero la sessione tramite thread per non bloccare l'event loop
         s = await asyncio.to_thread(stripe.checkout.Session.retrieve, session_id)
         
-        # Correzione AttributeError: usiamo getattr invece di .get() 
-        # perché gli oggetti Stripe non sono sempre dei dizionari puri
+        # Gli oggetti Stripe usano attributi, non .get()
         pi = getattr(s, 'payment_intent', None)
         
-        # Se il payment_intent è stato espanso come oggetto, restituiamo solo l'ID
-        if hasattr(pi, 'id'):
+        # Se il payment_intent è un oggetto espanso, restituiamo solo l'ID
+        if pi and hasattr(pi, 'id'):
             return pi.id
         return pi
     except Exception as e:
@@ -192,23 +191,31 @@ async def stripe_webhook(request: Request):
     try:
         if STRIPE_WEBHOOK_SECRET:
             event = stripe.Webhook.construct_event(body, sig, STRIPE_WEBHOOK_SECRET)
+            etype = event.type
+            data = event.data.object
         else:
             event = _json.loads(body)
+            etype = event['type']
+            data = event['data']['object']
         
-        etype = event['type']
-        data = event['data']['object']
-        
+        # Gestiamo il completamento del checkout
         if etype in ('checkout.session.completed', 'checkout.session.async_payment_succeeded'):
-            session_id = data.get('id')
+            # Accesso sicuro agli attributi dell'oggetto Stripe
+            session_id = getattr(data, 'id', None) or data.get('id')
+            
             tx = await db.payment_transactions.find_one({'session_id': session_id}, {'_id': 0})
+            
             if tx and tx.get('payment_status') != 'paid':
-                pi = data.get('payment_intent')
+                pi = getattr(data, 'payment_intent', None) or data.get('payment_intent')
+                
                 await db.payment_transactions.update_one(
                     {'session_id': session_id},
                     {'$set': {'payment_status': 'paid', 'status': 'complete', 'payment_intent_id': pi}},
                 )
+                
                 choice = tx.get('metadata', {}).get('payment_choice', 'deposit')
                 new_payment_status = 'fully_paid' if choice == 'full' else 'deposit_paid'
+                
                 await db.bookings.update_one(
                     {'id': tx['booking_id']},
                     {'$set': {
@@ -217,6 +224,7 @@ async def stripe_webhook(request: Request):
                         'payment_intent_id': pi,
                     }},
                 )
+                
                 booking = await db.bookings.find_one({'id': tx['booking_id']}, {'_id': 0})
                 settings = await get_settings()
                 if booking:
@@ -225,7 +233,18 @@ async def stripe_webhook(request: Request):
                         f"Prenotazione confermata — {settings.get('villa_name','Light Blue')}",
                         email_booking_confirmation_html(booking, settings),
                     ))
+
+        # Opzionale: Gestione sessione scaduta (rimette le date libere se necessario)
+        elif etype == 'checkout.session.expired':
+            session_id = getattr(data, 'id', None) or data.get('id')
+            await db.payment_transactions.update_one(
+                {'session_id': session_id},
+                {'$set': {'status': 'expired'}}
+            )
+
         return {'received': True}
+
     except Exception as e:
         logging.exception('Stripe webhook error')
-        raise HTTPException(400, str(e))
+        # Restituiamo 400 così Stripe sa che deve riprovare
+        raise HTTPException(400, f"Webhook Error: {str(e)}")
