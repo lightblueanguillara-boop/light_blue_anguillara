@@ -22,27 +22,34 @@ cloudinary.config(
 )
 
 def clean_date(date_val):
-    """Trasforma date ISO o stringhe sporche in oggetti date puri."""
+    """Trasforma diversi formati di data in oggetti date puri."""
     if not date_val:
         return None
-    if isinstance(date_val, datetime):
-        return date_val.date()
-    # Se è una stringa ISO (con la T), prendiamo solo la prima parte
-    if "T" in str(date_val):
-        return datetime.fromisoformat(str(date_val).replace("Z", "+00:00")).date()
-    # Se è una stringa semplice YYYY-MM-DD
-    return datetime.strptime(str(date_val)[:10], '%Y-%m-%d').date()
+    try:
+        if isinstance(date_val, datetime):
+            return date_val.date()
+        date_str = str(date_val)
+        if "T" in date_str:
+            return datetime.fromisoformat(date_str.replace("Z", "+00:00")).date()
+        return datetime.strptime(date_str[:10], '%Y-%m-%d').date()
+    except Exception as e:
+        print(f"DEBUG: Errore formattazione data '{date_val}': {e}")
+        return None
 
 @router.get("/admin/analytics")
 async def analytics(admin=Depends(get_current_admin)):
+    # 1. Recupero TUTTE le prenotazioni per debug
     bookings = await db.bookings.find(
-        {'status': {'$in': ['confirmed', 'pending']}}, {'_id': 0}
+        {}, {'_id': 0}
     ).to_list(10000)
+    
+    print(f"\n--- DEBUG START ---")
+    print(f"DEBUG: Totale prenotazioni trovate nel DB: {len(bookings)}")
     
     now = datetime.now(timezone.utc).date()
     months = []
     
-    # 1. Generiamo i 12 mesi per il grafico
+    # 2. Generiamo gli ultimi 12 mesi
     first_of_this_month = now.replace(day=1)
     for i in range(11, -1, -1):
         m_date = (first_of_this_month - timedelta(days=i*31)).replace(day=1)
@@ -57,26 +64,34 @@ async def analytics(admin=Depends(get_current_admin)):
     total_revenue_accumulated = 0.0
     total_nights_counter = 0
 
-    # 2. Elaborazione prenotazioni
+    # 3. Elaborazione
     for b in bookings:
+        b_id = b.get('id', 'N/A')
+        status = b.get('status', 'unknown')
+        
+        # Filtriamo solo quelle che dovrebbero produrre ricavi
+        if status not in ['confirmed', 'pending']:
+            print(f"DEBUG: Salto prenotazione {b_id} perché lo stato è '{status}'")
+            continue
+
         try:
-            # Pulizia sicura delle date
             check_in = clean_date(b.get('check_in'))
             check_out = clean_date(b.get('check_out'))
             
             if not check_in or not check_out:
+                print(f"DEBUG: Prenotazione {b_id} ha date nulle o invalide")
                 continue
 
             price_val = float(b.get('total_price', 0))
             total_revenue_accumulated += price_val
 
-            # Calcolo notti
             delta = check_out - check_in
             n_nights = max(1, delta.days)
             nightly_rate = price_val / n_nights
+            
+            print(f"DEBUG: Elaboro {b_id} | Status: {status} | Prezzo: {price_val} | Notti: {n_nights}")
 
-            # 3. Distribuzione nei mesi
-            # Cicliamo su ogni notte della prenotazione
+            matched_any_day = False
             for n in range(n_nights):
                 current_day = check_in + timedelta(days=n)
                 for mm in months:
@@ -84,10 +99,17 @@ async def analytics(admin=Depends(get_current_admin)):
                         mm['nights'] += 1
                         mm['revenue'] += round(nightly_rate, 2)
                         total_nights_counter += 1
+                        matched_any_day = True
+            
+            if not matched_any_day:
+                print(f"DEBUG: Prenotazione {b_id} ({check_in}) è FUORI dal range 12 mesi")
                         
         except Exception as e:
-            print(f"DEBUG ANALYTICS ERROR on booking: {e}")
+            print(f"DEBUG: Errore critico su prenotazione {b_id}: {e}")
             continue
+
+    print(f"DEBUG: Totale notti calcolate per i grafici: {total_nights_counter}")
+    print(f"--- DEBUG END ---\n")
 
     return {
         'monthly': months,
@@ -100,7 +122,7 @@ async def analytics(admin=Depends(get_current_admin)):
         },
     }
 
-# --- Resto del file (Settings, Gallery, etc.) rimasto invariato ---
+# --- Da qui in poi il codice rimane identico ---
 
 @router.get("/admin/settings")
 async def get_admin_settings(admin=Depends(get_current_admin)):
