@@ -20,12 +20,21 @@ stripe.api_key = STRIPE_API_KEY
 
 
 async def _retrieve_payment_intent_id(session_id: str) -> str | None:
-    """Retrieves PaymentIntent id from a checkout session."""
+    """Retrieves PaymentIntent id from a checkout session safely."""
     try:
+        # Recupero la sessione tramite thread per non bloccare l'event loop
         s = await asyncio.to_thread(stripe.checkout.Session.retrieve, session_id)
-        return s.get('payment_intent')
+        
+        # Correzione AttributeError: usiamo getattr invece di .get() 
+        # perché gli oggetti Stripe non sono sempre dei dizionari puri
+        pi = getattr(s, 'payment_intent', None)
+        
+        # Se il payment_intent è stato espanso come oggetto, restituiamo solo l'ID
+        if hasattr(pi, 'id'):
+            return pi.id
+        return pi
     except Exception as e:
-        logging.info(f"PaymentIntent retrieval error: {e}")
+        logging.error(f"PaymentIntent retrieval error: {e}")
         return None
 
 
@@ -34,14 +43,17 @@ async def _on_payment_paid(session_id: str, choice: str, booking_id: str):
     pi = await _retrieve_payment_intent_id(session_id)
     new_payment_status = 'fully_paid' if choice == 'full' else 'deposit_paid'
     update = {'status': 'confirmed', 'payment_status': new_payment_status}
+    
     if pi:
         update['payment_intent_id'] = pi
         await db.payment_transactions.update_one(
             {'session_id': session_id}, {'$set': {'payment_intent_id': pi}}
         )
+        
     await db.bookings.update_one({'id': booking_id}, {'$set': update})
     booking = await db.bookings.find_one({'id': booking_id}, {'_id': 0})
     settings = await get_settings()
+    
     if booking:
         asyncio.create_task(send_email_async(
             booking['guest_email'],
