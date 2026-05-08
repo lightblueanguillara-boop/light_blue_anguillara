@@ -2,7 +2,7 @@
 import asyncio
 import json as _json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 
 import stripe
 from fastapi import APIRouter, HTTPException, Request, BackgroundTasks
@@ -15,32 +15,33 @@ from pricing import compute_stay_pricing, dates_available
 router = APIRouter()
 stripe.api_key = STRIPE_API_KEY
 
-# --- UTILS ---
+# --- UTILS & CLEANUP ---
 
 async def cleanup_expired_bookings():
     """Rimuove prenotazioni pending abbandonate per liberare le date."""
     try:
-        # Consideriamo "abbandonate" le pending più vecchie di 30 minuti
-        cutoff = datetime.utcnow() - timedelta(minutes=30)
+        # Calcoliamo il limite di 30 minuti fa in formato ISO string (come nel tuo model)
+        cutoff_dt = datetime.now(timezone.utc) - timedelta(minutes=30)
+        cutoff_iso = cutoff_dt.isoformat()
         
-        # Cerchiamo i booking da cancellare
+        # Cerchiamo i booking pending creati prima del cutoff
         expired_bookings = await db.bookings.find({
             'status': 'pending',
             'payment_status': 'unpaid',
-            'created_at': {'$lt': cutoff} # Assicurati che il modello Booking salvi 'created_at'
+            'created_at': {'$lt': cutoff_iso}
         }).to_list(length=100)
 
         for b in expired_bookings:
-            # Opzionale: verifica su Stripe se la sessione è davvero chiusa
-            # Per semplicità, cancelliamo se superato il cutoff
-            await db.bookings.delete_one({'id': b['id']})
-            await db.payment_transactions.delete_one({'booking_id': b['id']})
-            logging.info(f"Cleanup: rimosso booking abbandonato {b['id']}")
+            booking_id = b.get('id')
+            await db.bookings.delete_one({'id': booking_id})
+            await db.payment_transactions.delete_one({'booking_id': booking_id})
+            logging.info(f"Cleanup: rimosso booking abbandonato {booking_id}")
             
     except Exception as e:
         logging.error(f"Cleanup Error: {e}")
 
 async def _retrieve_payment_intent_id(session_id: str) -> str | None:
+    """Retrieves PaymentIntent id from a checkout session safely."""
     try:
         s = await asyncio.to_thread(stripe.checkout.Session.retrieve, session_id)
         pi = getattr(s, 'payment_intent', None)
@@ -52,6 +53,7 @@ async def _retrieve_payment_intent_id(session_id: str) -> str | None:
         return None
 
 async def _on_payment_paid(session_id: str, choice: str, booking_id: str):
+    """Mark booking confirmed, store payment_intent_id, send confirmation email."""
     pi = await _retrieve_payment_intent_id(session_id)
     new_payment_status = 'fully_paid' if choice == 'full' else 'deposit_paid'
     update = {'status': 'confirmed', 'payment_status': new_payment_status}
@@ -77,7 +79,7 @@ async def _on_payment_paid(session_id: str, choice: str, booking_id: str):
 
 @router.post("/bookings/checkout")
 async def create_booking_checkout(payload: BookingCreate, request: Request, background_tasks: BackgroundTasks):
-    # Avvia il cleanup in background ogni volta che qualcuno prova a prenotare
+    # Avvia la pulizia delle vecchie sessioni abbandonate in background
     background_tasks.add_task(cleanup_expired_bookings)
 
     if payload.check_in >= payload.check_out:
@@ -87,6 +89,7 @@ async def create_booking_checkout(payload: BookingCreate, request: Request, back
 
     pricing = await compute_stay_pricing(payload.check_in, payload.check_out)
     settings = await get_settings()
+
     amount = pricing['total'] if payload.payment_choice == 'full' else pricing['deposit_amount']
     amount_cents = int(round(amount * 100))
 
@@ -103,10 +106,21 @@ async def create_booking_checkout(payload: BookingCreate, request: Request, back
         payment_choice=payload.payment_choice,
         status='pending',
         payment_status='unpaid',
-        created_at=datetime.utcnow(), # Importante per il cleanup
+        notes=payload.notes,
+        consent_newsletter=payload.consent_newsletter,
     )
     await db.bookings.insert_one(booking.model_dump())
 
+    # Gestione Newsletter
+    if payload.consent_newsletter:
+        existing = await db.subscribers.find_one({'email': payload.guest_email})
+        if not existing:
+            from models import Subscriber
+            sub = Subscriber(email=payload.guest_email, name=payload.guest_name, source='booking')
+            await db.subscribers.insert_one(sub.model_dump())
+
+    host_url = payload.origin_url.rstrip('/')
+    
     try:
         session = await asyncio.to_thread(
             stripe.checkout.Session.create,
@@ -120,14 +134,19 @@ async def create_booking_checkout(payload: BookingCreate, request: Request, back
                 'quantity': 1,
             }],
             mode='payment',
-            expires_at=int((datetime.utcnow() + timedelta(minutes=31)).timestamp()), # Scadenza Stripe sincronizzata
-            success_url=f"{payload.origin_url.rstrip('/')}/payment/success?session_id={{CHECKOUT_SESSION_ID}}",
-            cancel_url=f"{payload.origin_url.rstrip('/')}/payment/cancel",
-            metadata={'booking_id': booking.id, 'payment_choice': payload.payment_choice},
+            # Forza la scadenza Stripe a 31 minuti (minimo consentito circa 30m)
+            expires_at=int((datetime.now(timezone.utc) + timedelta(minutes=31)).timestamp()),
+            success_url=f"{host_url}/payment/success?session_id={{CHECKOUT_SESSION_ID}}",
+            cancel_url=f"{host_url}/payment/cancel",
+            metadata={
+                'booking_id': booking.id,
+                'payment_choice': payload.payment_choice,
+                'guest_email': payload.guest_email,
+            },
         )
     except Exception as e:
         logging.exception('Stripe session create failed')
-        await db.bookings.delete_one({'id': booking.id}) # Pulizia immediata se Stripe fallisce
+        await db.bookings.delete_one({'id': booking.id})
         raise HTTPException(500, f'Errore Stripe: {e}')
 
     tx = PaymentTransaction(
@@ -136,57 +155,112 @@ async def create_booking_checkout(payload: BookingCreate, request: Request, back
         amount=amount,
         payment_status='initiated',
         status='open',
-        created_at=datetime.utcnow()
+        metadata={'payment_choice': payload.payment_choice, 'booking_id': booking.id},
     )
     await db.payment_transactions.insert_one(tx.model_dump())
 
-    return {'url': session.url, 'session_id': session.id, 'booking_id': booking.id}
+    return {
+        'url': session.url,
+        'session_id': session.id,
+        'booking_id': booking.id,
+        'amount': amount,
+    }
+
 
 @router.get("/payments/status/{session_id}")
 async def payment_status(session_id: str):
     tx = await db.payment_transactions.find_one({'session_id': session_id}, {'_id': 0})
-    if not tx: raise HTTPException(404, 'Transaction not found')
-    if tx.get('payment_status') == 'paid': return tx
+    if not tx:
+        raise HTTPException(404, 'Transaction not found')
+
+    if tx.get('payment_status') == 'paid':
+        return tx
 
     try:
         session = await asyncio.to_thread(stripe.checkout.Session.retrieve, session_id)
         p_status = 'paid' if session.payment_status == 'paid' else 'unpaid'
         status = session.status
-    except:
+    except Exception as e:
+        logging.warning(f"Stripe status retrieval failed: {e}")
         return tx
 
-    await db.payment_transactions.update_one({'session_id': session_id}, {'$set': {'status': status, 'payment_status': p_status}})
-    if p_status == 'paid' and tx.get('payment_status') != 'paid':
-        await _on_payment_paid(session_id, tx['metadata']['payment_choice'], tx['booking_id'])
+    await db.payment_transactions.update_one(
+        {'session_id': session_id},
+        {'$set': {'status': status, 'payment_status': p_status}},
+    )
 
-    return {'payment_status': p_status, 'status': status}
+    if p_status == 'paid' and tx.get('payment_status') != 'paid':
+        choice = tx.get('metadata', {}).get('payment_choice', 'deposit')
+        await _on_payment_paid(session_id, choice, tx.get('booking_id'))
+
+    return {
+        'payment_status': p_status,
+        'status': status,
+        'booking_id': tx.get('booking_id'),
+    }
+
 
 @router.post("/webhook/stripe")
 async def stripe_webhook(request: Request):
     body = await request.body()
     sig = request.headers.get('Stripe-Signature', '')
+
     try:
-        event = stripe.Webhook.construct_event(body, sig, STRIPE_WEBHOOK_SECRET)
-        etype, data = event.type, event.data.object
+        if STRIPE_WEBHOOK_SECRET:
+            event = stripe.Webhook.construct_event(body, sig, STRIPE_WEBHOOK_SECRET)
+            etype = event.type
+            data = event.data.object
+        else:
+            event = _json.loads(body)
+            etype = event['type']
+            data = event['data']['object']
         
         if etype in ('checkout.session.completed', 'checkout.session.async_payment_succeeded'):
-            session_id = getattr(data, 'id', None)
+            session_id = getattr(data, 'id', None) or data.get('id')
             tx = await db.payment_transactions.find_one({'session_id': session_id})
+            
             if tx and tx.get('payment_status') != 'paid':
-                pi = getattr(data, 'payment_intent', None)
-                await db.payment_transactions.update_one({'session_id': session_id}, {'$set': {'payment_status': 'paid', 'status': 'complete', 'payment_intent_id': pi}})
+                pi = getattr(data, 'payment_intent', None) or data.get('payment_intent')
+                
+                await db.payment_transactions.update_one(
+                    {'session_id': session_id},
+                    {'$set': {'payment_status': 'paid', 'status': 'complete', 'payment_intent_id': pi}}
+                )
+                
                 choice = tx.get('metadata', {}).get('payment_choice', 'deposit')
-                await db.bookings.update_one({'id': tx['booking_id']}, {'$set': {'status': 'confirmed', 'payment_status': 'fully_paid' if choice == 'full' else 'deposit_paid', 'payment_intent_id': pi}})
-                # Email inviata via background task o simile qui...
-        
+                new_payment_status = 'fully_paid' if choice == 'full' else 'deposit_paid'
+                
+                await db.bookings.update_one(
+                    {'id': tx['booking_id']},
+                    {'$set': {
+                        'status': 'confirmed',
+                        'payment_status': new_payment_status,
+                        'payment_intent_id': pi,
+                    }},
+                )
+                
+                booking = await db.bookings.find_one({'id': tx['booking_id']})
+                settings = await get_settings()
+                if booking:
+                    asyncio.create_task(send_email_async(
+                        booking['guest_email'],
+                        f"Prenotazione confermata — {settings.get('villa_name','Light Blue')}",
+                        email_booking_confirmation_html(booking, settings),
+                    ))
+
         elif etype == 'checkout.session.expired':
-            session_id = getattr(data, 'id', None)
+            session_id = getattr(data, 'id', None) or data.get('id')
             tx = await db.payment_transactions.find_one({'session_id': session_id})
             if tx:
-                await db.bookings.delete_one({'id': tx['booking_id']}) # Libera le date
-                await db.payment_transactions.update_one({'session_id': session_id}, {'$set': {'status': 'expired'}})
+                # Libera le date eliminando il booking pending
+                await db.bookings.delete_one({'id': tx['booking_id']})
+                await db.payment_transactions.update_one(
+                    {'session_id': session_id},
+                    {'$set': {'status': 'expired'}}
+                )
 
         return {'received': True}
+
     except Exception as e:
-        logging.exception('Webhook error')
-        raise HTTPException(400, str(e))
+        logging.exception('Stripe webhook error')
+        raise HTTPException(400, f"Webhook Error: {str(e)}")
