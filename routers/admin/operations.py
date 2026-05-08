@@ -24,29 +24,57 @@ cloudinary.config(
 
 @router.get("/admin/analytics")
 async def analytics(admin=Depends(get_current_admin)):
+    # Recuperiamo tutte le prenotazioni che hanno uno stato rilevante
     bookings = await db.bookings.find(
         {'status': {'$in': ['confirmed', 'pending']}}, {'_id': 0}
     ).to_list(10000)
+    
     now = datetime.now(timezone.utc)
     months = []
+    
+    # Prepariamo la struttura per gli ultimi 12 mesi (per i grafici)
     for i in range(11, -1, -1):
-        m = (now.replace(day=1) - timedelta(days=30 * i))
+        # Calcolo corretto del primo giorno del mese per evitare errori con mesi di durata diversa
+        first_of_current = now.replace(day=1)
+        m = (first_of_current - timedelta(days=i*30)).replace(day=1)
         months.append({
-            'year': m.year, 'month': m.month, 'label': m.strftime('%b %Y'),
-            'nights': 0, 'revenue': 0.0,
+            'year': m.year, 
+            'month': m.month, 
+            'label': m.strftime('%b %Y'),
+            'nights': 0, 
+            'revenue': 0.0,
         })
 
-    for b in bookings:
-        nights_total = max(1, (datetime.strptime(b['check_out'], '%Y-%m-%d').date()
-                               - datetime.strptime(b['check_in'], '%Y-%m-%d').date()).days)
-        nightly = b['total_price'] / nights_total
-        for d in daterange(b['check_in'], b['check_out']):
-            for mm in months:
-                if d.year == mm['year'] and d.month == mm['month']:
-                    mm['nights'] += 1
-                    mm['revenue'] += round(nightly, 2)
+    # Usiamo una variabile separata per il totale globale, 
+    # così contiamo i soldi anche se la prenotazione è fuori dal range dei 12 mesi
+    total_revenue_accumulated = 0.0
 
-    total_revenue = sum(m['revenue'] for m in months)
+    for b in bookings:
+        try:
+            # Convertiamo le date da stringa a oggetto date
+            check_in_dt = datetime.strptime(b['check_in'], '%Y-%m-%d').date()
+            check_out_dt = datetime.strptime(b['check_out'], '%Y-%m-%d').date()
+            
+            nights_total = max(1, (check_out_dt - check_in_dt).days)
+            
+            # FIX: Convertiamo esplicitamente il prezzo in float (numero decimale)
+            price_val = float(b.get('total_price', 0))
+            nightly_rate = price_val / nights_total
+            
+            # Sommiamo al totale generale (quello che vedi nel quadratino in alto a sinistra)
+            total_revenue_accumulated += price_val
+
+            # Distribuiamo il valore nei singoli mesi per popolare il grafico
+            for d in daterange(b['check_in'], b['check_out']):
+                for mm in months:
+                    if d.year == mm['year'] and d.month == mm['month']:
+                        mm['nights'] += 1
+                        mm['revenue'] += round(nightly_rate, 2)
+        except Exception as e:
+            # Se una prenotazione ha dati corrotti, la saltiamo senza bloccare tutto il server
+            print(f"Errore processamento prenotazione: {e}")
+            continue
+
     total_nights = sum(m['nights'] for m in months)
     confirmed_count = sum(1 for b in bookings if b['status'] == 'confirmed')
     pending_count = sum(1 for b in bookings if b['status'] == 'pending')
@@ -56,7 +84,7 @@ async def analytics(admin=Depends(get_current_admin)):
     return {
         'monthly': months,
         'totals': {
-            'revenue': round(total_revenue, 2),
+            'revenue': round(total_revenue_accumulated, 2),
             'nights': total_nights,
             'confirmed_bookings': confirmed_count,
             'pending_bookings': pending_count,
