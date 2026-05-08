@@ -21,9 +21,20 @@ cloudinary.config(
     secure=True
 )
 
+def clean_date(date_val):
+    """Trasforma date ISO o stringhe sporche in oggetti date puri."""
+    if not date_val:
+        return None
+    if isinstance(date_val, datetime):
+        return date_val.date()
+    # Se è una stringa ISO (con la T), prendiamo solo la prima parte
+    if "T" in str(date_val):
+        return datetime.fromisoformat(str(date_val).replace("Z", "+00:00")).date()
+    # Se è una stringa semplice YYYY-MM-DD
+    return datetime.strptime(str(date_val)[:10], '%Y-%m-%d').date()
+
 @router.get("/admin/analytics")
 async def analytics(admin=Depends(get_current_admin)):
-    # 1. Recupero prenotazioni
     bookings = await db.bookings.find(
         {'status': {'$in': ['confirmed', 'pending']}}, {'_id': 0}
     ).to_list(10000)
@@ -31,10 +42,9 @@ async def analytics(admin=Depends(get_current_admin)):
     now = datetime.now(timezone.utc).date()
     months = []
     
-    # 2. Genero gli ultimi 12 mesi (fino al mese corrente)
+    # 1. Generiamo i 12 mesi per il grafico
     first_of_this_month = now.replace(day=1)
     for i in range(11, -1, -1):
-        # Sottraiamo i mesi in modo più preciso
         m_date = (first_of_this_month - timedelta(days=i*31)).replace(day=1)
         months.append({
             'year': m_date.year, 
@@ -45,49 +55,52 @@ async def analytics(admin=Depends(get_current_admin)):
         })
 
     total_revenue_accumulated = 0.0
+    total_nights_counter = 0
 
-    # 3. Elaborazione
+    # 2. Elaborazione prenotazioni
     for b in bookings:
         try:
-            check_in = datetime.strptime(b['check_in'], '%Y-%m-%d').date()
-            check_out = datetime.strptime(b['check_out'], '%Y-%m-%d').date()
+            # Pulizia sicura delle date
+            check_in = clean_date(b.get('check_in'))
+            check_out = clean_date(b.get('check_out'))
             
+            if not check_in or not check_out:
+                continue
+
             price_val = float(b.get('total_price', 0))
             total_revenue_accumulated += price_val
 
-            # Calcoliamo la durata
+            # Calcolo notti
             delta = check_out - check_in
-            nights_total = max(1, delta.days)
-            nightly_rate = price_val / nights_total
+            n_nights = max(1, delta.days)
+            nightly_rate = price_val / n_nights
 
-            # Invece di usare daterange esterno, usiamo un ciclo interno sicuro
-            for n in range(nights_total):
+            # 3. Distribuzione nei mesi
+            # Cicliamo su ogni notte della prenotazione
+            for n in range(n_nights):
                 current_day = check_in + timedelta(days=n)
                 for mm in months:
                     if current_day.year == mm['year'] and current_day.month == mm['month']:
                         mm['nights'] += 1
                         mm['revenue'] += round(nightly_rate, 2)
+                        total_nights_counter += 1
                         
         except Exception as e:
-            print(f"DEBUG ANALYTICS ERROR: {e}")
+            print(f"DEBUG ANALYTICS ERROR on booking: {e}")
             continue
-
-    # Calcolo totali per la risposta
-    total_nights_calculated = sum(m['nights'] for m in months)
-    confirmed_count = sum(1 for b in bookings if b['status'] == 'confirmed')
-    pending_count = sum(1 for b in bookings if b['status'] == 'pending')
-    messages_new = await db.contact_messages.count_documents({'status': 'new'})
 
     return {
         'monthly': months,
         'totals': {
             'revenue': round(total_revenue_accumulated, 2),
-            'nights': total_nights_calculated,
-            'confirmed_bookings': confirmed_count,
-            'pending_bookings': pending_count,
-            'new_messages': messages_new,
+            'nights': total_nights_counter,
+            'confirmed_bookings': sum(1 for b in bookings if b.get('status') == 'confirmed'),
+            'pending_bookings': sum(1 for b in bookings if b.get('status') == 'pending'),
+            'new_messages': await db.contact_messages.count_documents({'status': 'new'}),
         },
     }
+
+# --- Resto del file (Settings, Gallery, etc.) rimasto invariato ---
 
 @router.get("/admin/settings")
 async def get_admin_settings(admin=Depends(get_current_admin)):
