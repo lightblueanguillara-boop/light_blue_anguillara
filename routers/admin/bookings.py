@@ -12,31 +12,34 @@ from email_helpers import send_email_async, email_balance_reminder_html
 from models import Booking, BookingUpdate, RefundRequest
 from pricing import compute_refund_amount
 
-# Solitamente il router viene incluso con prefix="/api/admin" in main.py o server.py
-# Quindi qui usiamo percorsi relativi.
 router = APIRouter()
 stripe.api_key = STRIPE_API_KEY
 
 
-@router.get("/bookings")
+@router.get("/admin/bookings")
 async def list_bookings(admin=Depends(get_current_admin)):
+    # Questo serve per caricare la lista nella dashboard
     return await db.bookings.find({}, {'_id': 0}).sort('created_at', -1).to_list(10000)
 
 
-# QUESTA È LA ROTTA CHE DAVA ERRORE 405
-@router.post("/bookings/manual")
-async def create_manual_booking(b: Booking, admin=Depends(get_current_admin)):
-    """Crea una prenotazione manuale proteggendola dal cleanup automatico."""
-    b.source = 'manual'
-    # Assicuriamoci che abbia una data di creazione se il frontend non la invia
-    if not b.created_at:
-        b.created_at = datetime.now(timezone.utc).isoformat()
-    
+@router.post("/admin/bookings")
+async def create_booking_generic(b: Booking, admin=Depends(get_current_admin)):
+    # Rotta generica di backup
     await db.bookings.insert_one(b.model_dump())
     return b.model_dump()
 
 
-@router.patch("/bookings/{booking_id}")
+@router.post("/admin/bookings/manual")
+async def create_manual_booking(b: Booking, admin=Depends(get_current_admin)):
+    """Questa risolve l'errore 405 del tasto 'Salva' manuale."""
+    b.source = 'manual'
+    if not b.created_at:
+        b.created_at = datetime.now(timezone.utc).isoformat()
+    await db.bookings.insert_one(b.model_dump())
+    return b.model_dump()
+
+
+@router.patch("/admin/bookings/{booking_id}")
 async def update_booking(
     booking_id: str, updates: BookingUpdate, admin=Depends(get_current_admin)
 ):
@@ -47,13 +50,13 @@ async def update_booking(
     return await db.bookings.find_one({'id': booking_id}, {'_id': 0})
 
 
-@router.delete("/bookings/{booking_id}")
+@router.delete("/admin/bookings/{booking_id}")
 async def delete_booking(booking_id: str, admin=Depends(get_current_admin)):
     await db.bookings.delete_one({'id': booking_id})
     return {'ok': True}
 
 
-@router.get("/bookings/{booking_id}/refund-preview")
+@router.get("/admin/bookings/{booking_id}/refund-preview")
 async def refund_preview(booking_id: str, admin=Depends(get_current_admin)):
     b = await db.bookings.find_one({'id': booking_id}, {'_id': 0})
     if not b:
@@ -61,7 +64,7 @@ async def refund_preview(booking_id: str, admin=Depends(get_current_admin)):
     return compute_refund_amount(b)
 
 
-@router.post("/bookings/{booking_id}/cancel-refund")
+@router.post("/admin/bookings/{booking_id}/cancel-refund")
 async def cancel_and_refund(
     booking_id: str, payload: RefundRequest, admin=Depends(get_current_admin)
 ):
@@ -101,13 +104,11 @@ async def cancel_and_refund(
     return {
         'ok': True,
         'refund_amount': refund_amount,
-        'refund_percent': policy_calc['percent'],
-        'policy_reason': policy_calc['reason'],
         'stripe_refund_id': refund_obj.id if refund_obj else None,
     }
 
 
-@router.post("/bookings/{booking_id}/balance-reminder")
+@router.post("/admin/bookings/{booking_id}/balance-reminder")
 async def balance_reminder(booking_id: str, admin=Depends(get_current_admin)):
     b = await db.bookings.find_one({'id': booking_id}, {'_id': 0})
     if not b:
