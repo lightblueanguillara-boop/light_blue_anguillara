@@ -32,26 +32,23 @@ def clean_date(date_val):
         if "T" in date_str:
             return datetime.fromisoformat(date_str.replace("Z", "+00:00")).date()
         return datetime.strptime(date_str[:10], '%Y-%m-%d').date()
-    except Exception as e:
-        print(f"DEBUG: Errore formattazione data '{date_val}': {e}")
+    except Exception:
         return None
 
 @router.get("/admin/analytics")
 async def analytics(admin=Depends(get_current_admin)):
-    # 1. Recupero TUTTE le prenotazioni per debug
+    # 1. Recupero TUTTE le prenotazioni dal database
     bookings = await db.bookings.find(
         {}, {'_id': 0}
     ).to_list(10000)
     
-    print(f"\n--- DEBUG START ---")
-    print(f"DEBUG: Totale prenotazioni trovate nel DB: {len(bookings)}")
-    
     now = datetime.now(timezone.utc).date()
     months = []
     
-    # 2. Generiamo gli ultimi 12 mesi
+    # 2. Generiamo gli ultimi 12 mesi per il grafico
     first_of_this_month = now.replace(day=1)
     for i in range(11, -1, -1):
+        # Calcolo approssimativo ma efficace per i 12 mesi precedenti
         m_date = (first_of_this_month - timedelta(days=i*31)).replace(day=1)
         months.append({
             'year': m_date.year, 
@@ -64,14 +61,12 @@ async def analytics(admin=Depends(get_current_admin)):
     total_revenue_accumulated = 0.0
     total_nights_counter = 0
 
-    # 3. Elaborazione
+    # 3. Elaborazione di ogni singola prenotazione
     for b in bookings:
-        b_id = b.get('id', 'N/A')
         status = b.get('status', 'unknown')
         
-        # Filtriamo solo quelle che dovrebbero produrre ricavi
-        if status not in ['confirmed', 'pending']:
-            print(f"DEBUG: Salto prenotazione {b_id} perché lo stato è '{status}'")
+        # Consideriamo prenotazioni sito (confirmed/pending) ed esterne (Airbnb/iCal)
+        if status not in ['confirmed', 'pending', 'external']:
             continue
 
         try:
@@ -79,7 +74,6 @@ async def analytics(admin=Depends(get_current_admin)):
             check_out = clean_date(b.get('check_out'))
             
             if not check_in or not check_out:
-                print(f"DEBUG: Prenotazione {b_id} ha date nulle o invalide")
                 continue
 
             price_val = float(b.get('total_price', 0))
@@ -88,10 +82,8 @@ async def analytics(admin=Depends(get_current_admin)):
             delta = check_out - check_in
             n_nights = max(1, delta.days)
             nightly_rate = price_val / n_nights
-            
-            print(f"DEBUG: Elaboro {b_id} | Status: {status} | Prezzo: {price_val} | Notti: {n_nights}")
 
-            matched_any_day = False
+            # Ciclo per distribuire le notti nei mesi corretti del grafico
             for n in range(n_nights):
                 current_day = check_in + timedelta(days=n)
                 for mm in months:
@@ -99,17 +91,10 @@ async def analytics(admin=Depends(get_current_admin)):
                         mm['nights'] += 1
                         mm['revenue'] += round(nightly_rate, 2)
                         total_nights_counter += 1
-                        matched_any_day = True
-            
-            if not matched_any_day:
-                print(f"DEBUG: Prenotazione {b_id} ({check_in}) è FUORI dal range 12 mesi")
                         
-        except Exception as e:
-            print(f"DEBUG: Errore critico su prenotazione {b_id}: {e}")
+        except Exception:
+            # Salta la singola prenotazione se corrotta per non bloccare l'intera dashboard
             continue
-
-    print(f"DEBUG: Totale notti calcolate per i grafici: {total_nights_counter}")
-    print(f"--- DEBUG END ---\n")
 
     return {
         'monthly': months,
@@ -118,11 +103,10 @@ async def analytics(admin=Depends(get_current_admin)):
             'nights': total_nights_counter,
             'confirmed_bookings': sum(1 for b in bookings if b.get('status') == 'confirmed'),
             'pending_bookings': sum(1 for b in bookings if b.get('status') == 'pending'),
+            'external_bookings': sum(1 for b in bookings if b.get('status') == 'external'),
             'new_messages': await db.contact_messages.count_documents({'status': 'new'}),
         },
     }
-
-# --- Da qui in poi il codice rimane identico ---
 
 @router.get("/admin/settings")
 async def get_admin_settings(admin=Depends(get_current_admin)):
@@ -181,6 +165,6 @@ async def delete_gallery_image(image_id: str, admin=Depends(get_current_admin)):
     try:
         cloudinary.uploader.destroy(image['public_id'])
         await db.gallery.delete_one({"id": image_id})
-        return {"status": "success", "message": "Eliminata"}
+        return {"status": "success", "message": "Eliminata correttamente"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
