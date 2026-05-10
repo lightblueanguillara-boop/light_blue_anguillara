@@ -23,37 +23,57 @@ async def list_bookings(admin=Depends(get_current_admin)):
     return await db.bookings.find({}, {'_id': 0}).sort('created_at', -1).to_list(10000)
 
 @router.post("/admin/bookings/manual")
-async def create_manual_booking(b: Booking, admin=Depends(get_current_admin)):
-    """Crea una prenotazione manuale garantendo la stabilità del frontend."""
+async def create_manual_booking(payload: dict, admin=Depends(get_current_admin)):
+    """Crea una prenotazione manuale gestendo i campi obbligatori del modello Booking."""
     try:
-        # Forziamo i valori necessari che potrebbero mancare nel form manuale
-        b.source = 'manual'
-        if not b.id:
-            b.id = str(uuid.uuid4())
+        # 1. Calcoliamo i valori mancanti per soddisfare il modello Booking
+        total_price = float(payload.get('total_price', 0))
         
-        # Gestione date creazione
-        if not b.created_at:
-            b.created_at = datetime.now(timezone.utc).isoformat()
+        # Se deposit_amount manca, lo impostiamo uguale al totale o a 0
+        deposit_amount = float(payload.get('deposit_amount', 0))
         
-        # Valori di default per evitare errori 422 se il frontend non li invia
-        if not b.status: b.status = 'confirmed'
-        if not b.payment_status: b.payment_status = 'unpaid'
-        if not b.guest_name: b.guest_name = "Ospite Manuale"
-        
-        # Inserimento nel database
-        data = b.model_dump()
-        await db.bookings.insert_one(data)
+        # Creiamo l'oggetto finale assicurandoci che guest_email sia valida
+        # Se manca l'email, mettiamo un placeholder per evitare l'errore EmailStr
+        guest_email = payload.get('guest_email')
+        if not guest_email or guest_email.strip() == "":
+            guest_email = "manual@booking.com"
+
+        booking_data = {
+            "id": payload.get('id') or str(uuid.uuid4()),
+            "guest_name": payload.get('guest_name', 'Ospite Manuale'),
+            "guest_email": guest_email,
+            "guest_phone": payload.get('guest_phone'),
+            "check_in": payload.get('check_in'),
+            "check_out": payload.get('check_out'),
+            "adults": int(payload.get('adults', 2)),
+            "children": int(payload.get('children', 0)),
+            "total_price": total_price,
+            "deposit_amount": deposit_amount,
+            "payment_choice": payload.get('payment_choice', 'full'),
+            "cancellation_policy": payload.get('cancellation_policy', 'moderate'),
+            "status": 'confirmed', # Forziamo confirmed per vederlo nel calendario
+            "payment_status": payload.get('payment_status', 'unpaid'),
+            "source": 'manual',
+            "notes": payload.get('notes', ''),
+            "consent_newsletter": False,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+
+        # 2. Validazione minima date
+        if not booking_data['check_in'] or not booking_data['check_out']:
+            raise HTTPException(400, "Date check-in e check-out mancanti")
+
+        # 3. Inserimento nel database
+        await db.bookings.insert_one(booking_data)
         
         return {
             "ok": True,
             "message": "Prenotazione creata con successo",
-            "booking": data
+            "booking": booking_data
         }
     except Exception as e:
         logging.error(f"Errore creazione manuale: {e}")
-        # Se l'errore è di validazione (Pydantic), FastAPI restituisce 422 prima di entrare qui.
-        # Ma catturiamo altri errori di database o logica.
-        raise HTTPException(500, f"Errore interno: {str(e)}")
+        raise HTTPException(500, f"Errore durante il salvataggio: {str(e)}")
 
 @router.patch("/admin/bookings/{booking_id}")
 async def update_booking(
