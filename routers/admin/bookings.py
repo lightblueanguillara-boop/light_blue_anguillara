@@ -26,18 +26,14 @@ async def list_bookings(admin=Depends(get_current_admin)):
 async def create_manual_booking(payload: dict, admin=Depends(get_current_admin)):
     """Crea una prenotazione manuale gestendo i campi obbligatori del modello Booking."""
     try:
-        # 1. Calcoliamo i valori mancanti per soddisfare il modello Booking
         total_price = float(payload.get('total_price', 0))
-        
-        # Se deposit_amount manca, lo impostiamo uguale al totale o a 0
         deposit_amount = float(payload.get('deposit_amount', 0))
         
-        # Creiamo l'oggetto finale assicurandoci che guest_email sia valida
-        # Se manca l'email, mettiamo un placeholder per evitare l'errore EmailStr
         guest_email = payload.get('guest_email')
         if not guest_email or guest_email.strip() == "":
             guest_email = "manual@booking.com"
 
+        # Costruiamo il dizionario
         booking_data = {
             "id": payload.get('id') or str(uuid.uuid4()),
             "guest_name": payload.get('guest_name', 'Ospite Manuale'),
@@ -51,7 +47,7 @@ async def create_manual_booking(payload: dict, admin=Depends(get_current_admin))
             "deposit_amount": deposit_amount,
             "payment_choice": payload.get('payment_choice', 'full'),
             "cancellation_policy": payload.get('cancellation_policy', 'moderate'),
-            "status": 'confirmed', # Forziamo confirmed per vederlo nel calendario
+            "status": 'confirmed',
             "payment_status": payload.get('payment_status', 'unpaid'),
             "source": 'manual',
             "notes": payload.get('notes', ''),
@@ -59,12 +55,15 @@ async def create_manual_booking(payload: dict, admin=Depends(get_current_admin))
             "created_at": datetime.now(timezone.utc).isoformat()
         }
 
-        # 2. Validazione minima date
         if not booking_data['check_in'] or not booking_data['check_out']:
             raise HTTPException(400, "Date check-in e check-out mancanti")
 
-        # 3. Inserimento nel database
+        # Inserimento nel DB
         await db.bookings.insert_one(booking_data)
+        
+        # RIMUOVIAMO l'id interno di MongoDB (_id) per evitare l'errore ObjectId
+        if "_id" in booking_data:
+            del booking_data["_id"]
         
         return {
             "ok": True,
