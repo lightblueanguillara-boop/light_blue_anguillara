@@ -22,17 +22,17 @@ cloudinary.config(
 )
 
 def clean_date(date_val):
-    """Trasforma diversi formati di data in oggetti date puri senza fuso orario per il calcolo."""
+    """Sincronizza i formati data eliminando fusi orari e residui T/Z."""
     if not date_val:
         return None
     try:
-        if isinstance(date_val, datetime):
+        # Se è già un oggetto datetime/date
+        if hasattr(date_val, 'date'):
             return date_val.date()
-        date_str = str(date_val)
-        if "T" in date_str:
-            # Rimuoviamo il fuso orario per avere un confronto pulito tra giorni
-            return datetime.fromisoformat(date_str.split('T')[0]).date()
-        return datetime.strptime(date_str[:10], '%Y-%m-%d').date()
+        
+        # Pulizia stringa: prendiamo solo i primi 10 caratteri (YYYY-MM-DD)
+        date_str = str(date_val).split('T')[0].split(' ')[0].strip()
+        return datetime.strptime(date_str, '%Y-%m-%d').date()
     except Exception:
         return None
 
@@ -44,22 +44,19 @@ async def analytics(admin=Depends(get_current_admin)):
     now = datetime.now(timezone.utc).date()
     months = []
     
-    # 2. Generiamo i 12 mesi (da 11 mesi fa a oggi)
-    # Usiamo il primo giorno del mese per evitare errori di overflow (es. 31 marzo -> febbraio)
-    base_date = now.replace(day=1)
+    # 2. Generiamo i 12 mesi in modo ultra-preciso
+    # Partiamo dal mese corrente e andiamo indietro
     for i in range(11, -1, -1):
-        # Sottraiamo i mesi in modo più preciso
-        year = base_date.year
-        month = base_date.month - i
-        while month <= 0:
-            month += 12
-            year -= 1
+        target_date = now.replace(day=1)
+        # Sottraiamo i mesi gestendo il cambio anno
+        for _ in range(i):
+            last_day_prev_month = target_date - timedelta(days=1)
+            target_date = last_day_prev_month.replace(day=1)
         
-        m_date = datetime(year, month, 1).date()
         months.append({
-            'year': m_date.year, 
-            'month': m_date.month, 
-            'label': m_date.strftime('%b %Y'),
+            'year': target_date.year, 
+            'month': target_date.month, 
+            'label': target_date.strftime('%b %Y'),
             'nights': 0, 
             'revenue': 0.0,
         })
@@ -70,8 +67,6 @@ async def analytics(admin=Depends(get_current_admin)):
     # 3. Elaborazione prenotazioni
     for b in bookings:
         status = b.get('status', 'unknown')
-        
-        # Consideriamo confermate, pendenti (per previsione) ed esterne (Airbnb/iCal)
         if status not in ['confirmed', 'pending', 'external']:
             continue
 
@@ -82,22 +77,24 @@ async def analytics(admin=Depends(get_current_admin)):
             if not check_in or not check_out or check_out <= check_in:
                 continue
 
+            # Usiamo il prezzo salvato (ora che il PATCH funziona!)
             price_val = float(b.get('total_price', 0))
             total_revenue_accumulated += price_val
 
             delta = check_out - check_in
             n_nights = delta.days
+            # Evitiamo divisioni per zero
             nightly_rate = price_val / n_nights if n_nights > 0 else 0
 
-            # Distribuzione delle notti e del ricavo nei mesi del grafico
+            # Distribuzione giornaliera sui mesi del grafico
             for n in range(n_nights):
-                current_day = check_in + timedelta(days=n)
+                day_to_attribute = check_in + timedelta(days=n)
                 for mm in months:
-                    if current_day.year == mm['year'] and current_day.month == mm['month']:
+                    if day_to_attribute.year == mm['year'] and day_to_attribute.month == mm['month']:
                         mm['nights'] += 1
                         mm['revenue'] = round(mm['revenue'] + nightly_rate, 2)
                         total_nights_counter += 1
-                        break # Trovato il mese, passa al giorno successivo
+                        break 
                         
         except Exception:
             continue
@@ -114,6 +111,7 @@ async def analytics(admin=Depends(get_current_admin)):
         },
     }
 
+# --- Resto del file invariato ---
 @router.get("/admin/settings")
 async def get_admin_settings(admin=Depends(get_current_admin)):
     return await get_settings()
