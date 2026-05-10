@@ -40,7 +40,7 @@ async def ical_sync_run():
                         if not dtstart or not dtend:
                             continue
 
-                        # Estrazione robusta della data (gestisce sia datetime che date pura)
+                        # Estrazione robusta della data
                         start = dtstart.dt
                         end = dtend.dt
 
@@ -52,24 +52,30 @@ async def ical_sync_run():
                         uid = str(comp.get('uid', uuid.uuid4()))
                         booking_id = f"ext-{src}-{uid}"
 
-                        # Usiamo un'email che superi la validazione (evitando .invalid)
-                        # Il formato sync-airbnb-1@dominio.it è perfetto per il database
-                        booking = Booking(
-                            id=booking_id,
-                            guest_name=f"Ospite {src.capitalize()}",
-                            guest_email=f"sync-{src}-{imported}@lightblue-anguillara.it",
-                            check_in=start.isoformat(),
-                            check_out=end.isoformat(),
-                            total_price=0,
-                            deposit_amount=0,
-                            status='external',
-                            payment_status='unpaid',
-                            source=src,
-                        )
+                        # Prepariamo i dati
+                        # Usiamo $set per aggiornare le date (che possono cambiare)
+                        # Usiamo $setOnInsert per i valori che non vogliamo sovrascrivere se già esistono
+                        update_data = {
+                            '$set': {
+                                'check_in': start.isoformat(),
+                                'check_out': end.isoformat(),
+                                'status': 'external',
+                                'source': src,
+                            },
+                            '$setOnInsert': {
+                                'id': booking_id,
+                                'guest_name': f"Ospite {src.capitalize()}",
+                                'guest_email': f"sync-{src}-{imported}@lightblue-anguillara.it",
+                                'total_price': 0,
+                                'deposit_amount': 0,
+                                'payment_status': 'unpaid',
+                                'created_at': datetime.now(timezone.utc).isoformat(),
+                            }
+                        }
 
                         await db.bookings.update_one(
-                            {'id': booking.id}, 
-                            {'$set': booking.model_dump()}, 
+                            {'id': booking_id}, 
+                            update_data, 
                             upsert=True
                         )
                         new_external_ids.append(booking_id)
