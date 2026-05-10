@@ -22,7 +22,7 @@ cloudinary.config(
 )
 
 def clean_date(date_val):
-    """Trasforma diversi formati di data in oggetti date puri."""
+    """Trasforma diversi formati di data in oggetti date puri senza fuso orario per il calcolo."""
     if not date_val:
         return None
     try:
@@ -30,26 +30,32 @@ def clean_date(date_val):
             return date_val.date()
         date_str = str(date_val)
         if "T" in date_str:
-            return datetime.fromisoformat(date_str.replace("Z", "+00:00")).date()
+            # Rimuoviamo il fuso orario per avere un confronto pulito tra giorni
+            return datetime.fromisoformat(date_str.split('T')[0]).date()
         return datetime.strptime(date_str[:10], '%Y-%m-%d').date()
     except Exception:
         return None
 
 @router.get("/admin/analytics")
 async def analytics(admin=Depends(get_current_admin)):
-    # 1. Recupero TUTTE le prenotazioni dal database
-    bookings = await db.bookings.find(
-        {}, {'_id': 0}
-    ).to_list(10000)
+    # 1. Recupero TUTTE le prenotazioni
+    bookings = await db.bookings.find({}, {'_id': 0}).to_list(10000)
     
     now = datetime.now(timezone.utc).date()
     months = []
     
-    # 2. Generiamo gli ultimi 12 mesi per il grafico
-    first_of_this_month = now.replace(day=1)
+    # 2. Generiamo i 12 mesi (da 11 mesi fa a oggi)
+    # Usiamo il primo giorno del mese per evitare errori di overflow (es. 31 marzo -> febbraio)
+    base_date = now.replace(day=1)
     for i in range(11, -1, -1):
-        # Calcolo approssimativo ma efficace per i 12 mesi precedenti
-        m_date = (first_of_this_month - timedelta(days=i*31)).replace(day=1)
+        # Sottraiamo i mesi in modo più preciso
+        year = base_date.year
+        month = base_date.month - i
+        while month <= 0:
+            month += 12
+            year -= 1
+        
+        m_date = datetime(year, month, 1).date()
         months.append({
             'year': m_date.year, 
             'month': m_date.month, 
@@ -61,11 +67,11 @@ async def analytics(admin=Depends(get_current_admin)):
     total_revenue_accumulated = 0.0
     total_nights_counter = 0
 
-    # 3. Elaborazione di ogni singola prenotazione
+    # 3. Elaborazione prenotazioni
     for b in bookings:
         status = b.get('status', 'unknown')
         
-        # Consideriamo prenotazioni sito (confirmed/pending) ed esterne (Airbnb/iCal)
+        # Consideriamo confermate, pendenti (per previsione) ed esterne (Airbnb/iCal)
         if status not in ['confirmed', 'pending', 'external']:
             continue
 
@@ -73,27 +79,27 @@ async def analytics(admin=Depends(get_current_admin)):
             check_in = clean_date(b.get('check_in'))
             check_out = clean_date(b.get('check_out'))
             
-            if not check_in or not check_out:
+            if not check_in or not check_out or check_out <= check_in:
                 continue
 
             price_val = float(b.get('total_price', 0))
             total_revenue_accumulated += price_val
 
             delta = check_out - check_in
-            n_nights = max(1, delta.days)
-            nightly_rate = price_val / n_nights
+            n_nights = delta.days
+            nightly_rate = price_val / n_nights if n_nights > 0 else 0
 
-            # Ciclo per distribuire le notti nei mesi corretti del grafico
+            # Distribuzione delle notti e del ricavo nei mesi del grafico
             for n in range(n_nights):
                 current_day = check_in + timedelta(days=n)
                 for mm in months:
                     if current_day.year == mm['year'] and current_day.month == mm['month']:
                         mm['nights'] += 1
-                        mm['revenue'] += round(nightly_rate, 2)
+                        mm['revenue'] = round(mm['revenue'] + nightly_rate, 2)
                         total_nights_counter += 1
+                        break # Trovato il mese, passa al giorno successivo
                         
         except Exception:
-            # Salta la singola prenotazione se corrotta per non bloccare l'intera dashboard
             continue
 
     return {
