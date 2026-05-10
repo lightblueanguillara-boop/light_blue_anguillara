@@ -2,14 +2,13 @@
 import asyncio
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, date, timezone
 
 import requests
 from icalendar import Calendar
 
 from db import db, get_settings
 from models import Booking
-
 
 async def ical_sync_run():
     s = await get_settings()
@@ -18,42 +17,80 @@ async def ical_sync_run():
         ('booking', s.get('ical_booking_url', '')),
     ]
     imported = 0
-    await db.bookings.delete_many({'source': {'$in': ['airbnb', 'booking']}, 'status': 'external'})
+    new_external_ids = []
+
     for src, url in urls:
         if not url:
             continue
         try:
+            logging.info(f"Inizio sincronizzazione iCal per {src}...")
             r = await asyncio.to_thread(lambda u=url: requests.get(u, timeout=15))
+            
             if r.status_code != 200:
+                logging.error(f"Errore download iCal {src}: Status {r.status_code}")
                 continue
+
             cal = Calendar.from_ical(r.content)
             for comp in cal.walk():
                 if comp.name == 'VEVENT':
-                    start = comp.get('dtstart').dt
-                    end = comp.get('dtend').dt
-                    if isinstance(start, datetime):
-                        start = start.date()
-                    if isinstance(end, datetime):
-                        end = end.date()
-                    uid = str(comp.get('uid', uuid.uuid4()))
-                    booking = Booking(
-                        id=f"ext-{src}-{uid}",
-                        guest_name=f"External ({src})",
-                        guest_email=f"{src}@external.invalid",
-                        check_in=start.isoformat(),
-                        check_out=end.isoformat(),
-                        total_price=0,
-                        deposit_amount=0,
-                        status='external',
-                        payment_status='unpaid',
-                        source=src,
-                    )
-                    await db.bookings.update_one(
-                        {'id': booking.id}, {'$set': booking.model_dump()}, upsert=True
-                    )
-                    imported += 1
+                    try:
+                        dtstart = comp.get('dtstart')
+                        dtend = comp.get('dtend')
+                        
+                        if not dtstart or not dtend:
+                            continue
+
+                        # Estrazione robusta della data (gestisce sia datetime che date pura)
+                        start = dtstart.dt
+                        end = dtend.dt
+
+                        if isinstance(start, datetime):
+                            start = start.date()
+                        if isinstance(end, datetime):
+                            end = end.date()
+
+                        uid = str(comp.get('uid', uuid.uuid4()))
+                        booking_id = f"ext-{src}-{uid}"
+
+                        # Usiamo un'email che superi la validazione (evitando .invalid)
+                        # Il formato sync-airbnb-1@dominio.it è perfetto per il database
+                        booking = Booking(
+                            id=booking_id,
+                            guest_name=f"Ospite {src.capitalize()}",
+                            guest_email=f"sync-{src}-{imported}@lightblue-anguillara.it",
+                            check_in=start.isoformat(),
+                            check_out=end.isoformat(),
+                            total_price=0,
+                            deposit_amount=0,
+                            status='external',
+                            payment_status='unpaid',
+                            source=src,
+                        )
+
+                        await db.bookings.update_one(
+                            {'id': booking.id}, 
+                            {'$set': booking.model_dump()}, 
+                            upsert=True
+                        )
+                        new_external_ids.append(booking_id)
+                        imported += 1
+                        
+                    except Exception as vevent_error:
+                        logging.warning(f"Salto un evento iCal per errore parsing: {vevent_error}")
+                        continue
+
         except Exception as e:
-            logging.exception(f'iCal sync error for {src}: {e}')
+            logging.exception(f'Errore critico durante sync iCal per {src}: {e}')
+
+    # Pulizia: eliminiamo solo le vecchie prenotazioni esterne non più presenti nel file
+    if imported > 0 or any(url for _, url in urls):
+        await db.bookings.delete_many({
+            'source': {'$in': ['airbnb', 'booking']}, 
+            'status': 'external',
+            'id': {'$nin': new_external_ids}
+        })
+
+    # Aggiornamento statistiche nel database
     await db.settings.update_one(
         {'id': 'global'},
         {'$set': {
@@ -61,4 +98,6 @@ async def ical_sync_run():
             'last_ical_sync_count': imported,
         }},
     )
+    
+    logging.info(f"Sincronizzazione completata con successo: {imported} eventi.")
     return {'imported': imported, 'at': datetime.now(timezone.utc).isoformat()}
