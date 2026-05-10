@@ -4,6 +4,7 @@ import logging
 import uuid
 import urllib.parse
 from datetime import datetime, timezone
+from typing import Optional
 
 import stripe
 from fastapi import APIRouter, Depends, HTTPException
@@ -17,61 +18,63 @@ from pricing import compute_refund_amount
 router = APIRouter()
 stripe.api_key = STRIPE_API_KEY
 
-
 @router.get("/admin/bookings")
 async def list_bookings(admin=Depends(get_current_admin)):
     return await db.bookings.find({}, {'_id': 0}).sort('created_at', -1).to_list(10000)
-
 
 @router.post("/admin/bookings/manual")
 async def create_manual_booking(b: Booking, admin=Depends(get_current_admin)):
     """Crea una prenotazione manuale garantendo la stabilità del frontend."""
     try:
+        # Forziamo i valori necessari che potrebbero mancare nel form manuale
         b.source = 'manual'
         if not b.id:
             b.id = str(uuid.uuid4())
+        
+        # Gestione date creazione
         if not b.created_at:
             b.created_at = datetime.now(timezone.utc).isoformat()
         
-        await db.bookings.insert_one(b.model_dump())
+        # Valori di default per evitare errori 422 se il frontend non li invia
+        if not b.status: b.status = 'confirmed'
+        if not b.payment_status: b.payment_status = 'unpaid'
+        if not b.guest_name: b.guest_name = "Ospite Manuale"
+        
+        # Inserimento nel database
+        data = b.model_dump()
+        await db.bookings.insert_one(data)
         
         return {
             "ok": True,
             "message": "Prenotazione creata con successo",
-            "booking": b.model_dump()
+            "booking": data
         }
     except Exception as e:
         logging.error(f"Errore creazione manuale: {e}")
+        # Se l'errore è di validazione (Pydantic), FastAPI restituisce 422 prima di entrare qui.
+        # Ma catturiamo altri errori di database o logica.
         raise HTTPException(500, f"Errore interno: {str(e)}")
-
 
 @router.patch("/admin/bookings/{booking_id}")
 async def update_booking(
     booking_id: str, updates: BookingUpdate, admin=Depends(get_current_admin)
 ):
-    # Decodifica ID per gestire caratteri speciali nelle prenotazioni esterne
     decoded_id = urllib.parse.unquote(booking_id)
-    
     patch = updates.model_dump(exclude_unset=True)
     if not patch:
         raise HTTPException(400, 'No fields to update')
     
-    # Aggiornamento nel database
     result = await db.bookings.update_one({'id': decoded_id}, {'$set': patch})
-    
-    # Se non trova l'ID decodificato, prova con l'originale
     if result.matched_count == 0 and decoded_id != booking_id:
         await db.bookings.update_one({'id': booking_id}, {'$set': patch})
 
     return await db.bookings.find_one({'id': decoded_id}, {'_id': 0})
-
 
 @router.delete("/admin/bookings/{booking_id}")
 async def delete_booking(booking_id: str, admin=Depends(get_current_admin)):
     decoded_id = urllib.parse.unquote(booking_id)
     await db.bookings.delete_one({'id': decoded_id})
     return {'ok': True}
-
 
 @router.post("/admin/bookings/{booking_id}/cancel-refund")
 async def cancel_and_refund(
@@ -114,7 +117,6 @@ async def cancel_and_refund(
         }},
     )
     return {'ok': True, 'refund_amount': refund_amount}
-
 
 @router.post("/admin/bookings/{booking_id}/balance-reminder")
 async def balance_reminder(booking_id: str, admin=Depends(get_current_admin)):
