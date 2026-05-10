@@ -118,7 +118,6 @@ class VillaSettings(BaseModel):
         "raggiungere in pochi passi il lungolago, le spiagge e tutte le attrazioni del territorio."
     )
     seasonal_rates: List[SeasonalRate] = []
-    # Last-minute banner
     last_minute_enabled: bool = False
     last_minute_window_days: int = 14
     last_minute_discount_percent: float = 15.0
@@ -164,6 +163,8 @@ class BookingUpdate(BaseModel):
     notes: Optional[str] = None
     check_in: Optional[str] = None
     check_out: Optional[str] = None
+    total_price: Optional[float] = None
+    deposit_amount: Optional[float] = None
 
     @field_validator('check_in', 'check_out')
     @classmethod
