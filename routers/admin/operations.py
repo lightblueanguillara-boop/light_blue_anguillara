@@ -15,6 +15,7 @@ from models import SettingsUpdate, GalleryImage, GalleryImageUpdate
 
 router = APIRouter()
 
+# Configurazione Cloudinary (Recuperata da variabili d'ambiente)
 cloudinary.config(
     cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
     api_key=os.getenv("CLOUDINARY_API_KEY"),
@@ -24,22 +25,21 @@ cloudinary.config(
 
 @router.get("/admin/analytics")
 async def analytics(admin=Depends(get_current_admin)):
-    # 1. Recupero TUTTE le prenotazioni dal database
+    # 1. Recupero TUTTE le prenotazioni
     bookings = await db.bookings.find({}, {'_id': 0}).to_list(10000)
     now = datetime.now(timezone.utc).date()
     
     months = []
     month_map = {}
     
-    # 2. Generiamo i 12 mesi per il grafico (mappa anno-mese -> indice lista)
-    # Usiamo un calcolo basato su giorni per andare indietro in modo sicuro
+    # 2. Generazione dei 12 mesi (stabile e indipendente dal server)
     base_date = now.replace(day=1)
     for i in range(11, -1, -1):
-        # Sottraiamo circa 31 giorni per ogni mese per assicurarci di saltare indietro correttamente
-        target_date = (base_date - timedelta(days=i*30.5)).replace(day=1)
-        
+        # Calcolo mese per mese andando a ritroso
+        target_date = (base_date - timedelta(days=i*31)).replace(day=1)
         key = f"{target_date.year}-{target_date.month}"
         month_map[key] = len(months)
+        
         months.append({
             'year': target_date.year, 
             'month': target_date.month, 
@@ -50,19 +50,20 @@ async def analytics(admin=Depends(get_current_admin)):
 
     total_revenue_accumulated = 0.0
 
-    # 3. Elaborazione prenotazioni
+    # 3. Elaborazione dei dati
     for b in bookings:
+        # Filtriamo stati non validi (includiamo però confirmed, pending, external)
         status = b.get('status')
-        if status not in ['confirmed', 'pending', 'external']:
+        if status in ['cancelled', 'deleted']:
             continue
 
         try:
-            # Recupero Prezzo
+            # Prezzo totale
             price_val = float(b.get('total_price', 0))
             total_revenue_accumulated += price_val
 
-            # Recupero Date con pulizia "forzata" (string slicing)
-            # Prendiamo solo i primi 10 caratteri (YYYY-MM-DD) ignorando T, Z e fusi orari
+            # Pulizia radicale delle date (fondamentale per server US/California)
+            # Prendiamo solo i primi 10 caratteri "YYYY-MM-DD"
             raw_in = b.get('check_in')
             if not raw_in:
                 continue
@@ -75,10 +76,10 @@ async def analytics(admin=Depends(get_current_admin)):
             
             if key in month_map:
                 idx = month_map[key]
-                # Aggiorniamo il ricavo del mese (tutto l'importo nel mese di check-in)
+                # Assegniamo il ricavo al mese del check-in
                 months[idx]['revenue'] = round(months[idx]['revenue'] + price_val, 2)
                 
-                # Calcolo notti per il grafico dell'occupazione
+                # Calcolo notti per il grafico occupazione
                 raw_out = b.get('check_out')
                 if raw_out:
                     date_str_out = str(raw_out)[:10]
@@ -87,7 +88,7 @@ async def analytics(admin=Depends(get_current_admin)):
                     months[idx]['nights'] += max(0, diff)
                         
         except Exception as e:
-            logging.error(f"Errore riga booking analytics: {e}")
+            logging.error(f"Errore calcolo booking: {e}")
             continue
 
     return {
@@ -102,8 +103,7 @@ async def analytics(admin=Depends(get_current_admin)):
         },
     }
 
-# --- Rotte Opzionali (Settings, iCal, Gallery) ---
-
+# --- Gestione Settings ---
 @router.get("/admin/settings")
 async def get_admin_settings(admin=Depends(get_current_admin)):
     return await get_settings()
@@ -115,10 +115,12 @@ async def update_admin_settings(updates: SettingsUpdate, admin=Depends(get_curre
     await db.settings.update_one({'id': 'global'}, {'$set': patch}, upsert=True)
     return await get_settings()
 
+# --- Sincronizzazione iCal ---
 @router.post("/admin/ical/sync")
 async def ical_sync(admin=Depends(get_current_admin)):
     return await ical_sync_run()
 
+# --- Gestione Galleria Immagini ---
 @router.get("/admin/gallery", response_model=List[GalleryImage])
 async def list_gallery_images(admin=Depends(get_current_admin)):
     return await db.gallery.find({}, {'_id': 0}).sort("order", 1).to_list(1000)
