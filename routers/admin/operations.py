@@ -22,36 +22,21 @@ cloudinary.config(
     secure=True
 )
 
-def clean_date(date_val):
-    """Sincronizza i formati data eliminando fusi orari e residui T/Z."""
-    if not date_val:
-        return None
-    try:
-        if hasattr(date_val, 'date'):
-            return date_val.date()
-        # Pulizia stringa: prendiamo solo i primi 10 caratteri (YYYY-MM-DD)
-        date_str = str(date_val).split('T')[0].split(' ')[0].strip()
-        return datetime.strptime(date_str, '%Y-%m-%d').date()
-    except Exception:
-        return None
-
 @router.get("/admin/analytics")
 async def analytics(admin=Depends(get_current_admin)):
-    # 1. Recupero TUTTE le prenotazioni
+    # 1. Recupero TUTTE le prenotazioni dal database
     bookings = await db.bookings.find({}, {'_id': 0}).to_list(10000)
     now = datetime.now(timezone.utc).date()
     
-    # 2. Generiamo i 12 mesi per il grafico (mappa anno-mese -> indice lista)
     months = []
     month_map = {}
     
-    # Partiamo dal mese corrente e andiamo indietro di 11 mesi
+    # 2. Generiamo i 12 mesi per il grafico (mappa anno-mese -> indice lista)
+    # Usiamo un calcolo basato su giorni per andare indietro in modo sicuro
+    base_date = now.replace(day=1)
     for i in range(11, -1, -1):
-        # Calcolo data del primo giorno del mese relativo
-        target_date = now.replace(day=1)
-        for _ in range(i):
-            last_day_prev_month = target_date - timedelta(days=1)
-            target_date = last_day_prev_month.replace(day=1)
+        # Sottraiamo circa 31 giorni per ogni mese per assicurarci di saltare indietro correttamente
+        target_date = (base_date - timedelta(days=i*30.5)).replace(day=1)
         
         key = f"{target_date.year}-{target_date.month}"
         month_map[key] = len(months)
@@ -68,34 +53,41 @@ async def analytics(admin=Depends(get_current_admin)):
     # 3. Elaborazione prenotazioni
     for b in bookings:
         status = b.get('status')
-        # Consideriamo solo prenotazioni valide (confermate, pendenti o esterne)
         if status not in ['confirmed', 'pending', 'external']:
             continue
 
         try:
-            # Recupero e somma del prezzo totale
+            # Recupero Prezzo
             price_val = float(b.get('total_price', 0))
             total_revenue_accumulated += price_val
 
-            # Recupero e pulizia date
-            check_in = clean_date(b.get('check_in'))
-            check_out = clean_date(b.get('check_out'))
+            # Recupero Date con pulizia "forzata" (string slicing)
+            # Prendiamo solo i primi 10 caratteri (YYYY-MM-DD) ignorando T, Z e fusi orari
+            raw_in = b.get('check_in')
+            if not raw_in:
+                continue
             
-            if check_in:
-                # Troviamo il mese di appartenenza nel grafico tramite la mappa
-                key = f"{check_in.year}-{check_in.month}"
-                if key in month_map:
-                    idx = month_map[key]
-                    # Assegniamo l'intero ricavo al mese del check-in
-                    months[idx]['revenue'] = round(months[idx]['revenue'] + price_val, 2)
-                    
-                    # Calcolo notti per la statistica del grafico
-                    if check_out:
-                        diff = (check_out - check_in).days
-                        months[idx]['nights'] += max(0, diff)
+            date_str_in = str(raw_in)[:10]
+            dt_in = datetime.strptime(date_str_in, '%Y-%m-%d').date()
+            
+            # Chiave per la mappa: "2026-5"
+            key = f"{dt_in.year}-{dt_in.month}"
+            
+            if key in month_map:
+                idx = month_map[key]
+                # Aggiorniamo il ricavo del mese (tutto l'importo nel mese di check-in)
+                months[idx]['revenue'] = round(months[idx]['revenue'] + price_val, 2)
+                
+                # Calcolo notti per il grafico dell'occupazione
+                raw_out = b.get('check_out')
+                if raw_out:
+                    date_str_out = str(raw_out)[:10]
+                    dt_out = datetime.strptime(date_str_out, '%Y-%m-%d').date()
+                    diff = (dt_out - dt_in).days
+                    months[idx]['nights'] += max(0, diff)
                         
         except Exception as e:
-            logging.error(f"Errore calcolo analytics: {e}")
+            logging.error(f"Errore riga booking analytics: {e}")
             continue
 
     return {
@@ -110,7 +102,7 @@ async def analytics(admin=Depends(get_current_admin)):
         },
     }
 
-# --- Altre rotte operative (Settings, iCal, Gallery) ---
+# --- Rotte Opzionali (Settings, iCal, Gallery) ---
 
 @router.get("/admin/settings")
 async def get_admin_settings(admin=Depends(get_current_admin)):
