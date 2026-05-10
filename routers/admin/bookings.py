@@ -29,7 +29,7 @@ async def create_manual_booking(b: Booking, admin=Depends(get_current_admin)):
         # 1. Forza la sorgente manuale
         b.source = 'manual'
         
-        # 2. Genera un ID se manca (evita crash del database o frontend)
+        # 2. Genera un ID se manca
         if not b.id:
             b.id = str(uuid.uuid4())
             
@@ -40,7 +40,7 @@ async def create_manual_booking(b: Booking, admin=Depends(get_current_admin)):
         # 4. Inserimento nel DB
         await db.bookings.insert_one(b.model_dump())
         
-        # 5. Restituiamo un oggetto pulito e una conferma esplicita
+        # 5. Restituiamo conferma
         return {
             "ok": True,
             "message": "Prenotazione creata con successo",
@@ -58,6 +58,7 @@ async def update_booking(
     patch = updates.model_dump(exclude_unset=True)
     if not patch:
         raise HTTPException(400, 'No fields to update')
+    
     await db.bookings.update_one({'id': booking_id}, {'$set': patch})
     return await db.bookings.find_one({'id': booking_id}, {'_id': 0})
 
