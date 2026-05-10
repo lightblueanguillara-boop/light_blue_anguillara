@@ -38,7 +38,7 @@ async def create_manual_booking(payload: dict, admin=Depends(get_current_admin))
             "id": payload.get('id') or str(uuid.uuid4()),
             "guest_name": payload.get('guest_name', 'Ospite Manuale'),
             "guest_email": guest_email,
-            "guest_phone": payload.get('guest_phone'),
+            "guest_phone": payload.get('guest_phone', ''),
             "check_in": payload.get('check_in'),
             "check_out": payload.get('check_out'),
             "adults": int(payload.get('adults', 2)),
