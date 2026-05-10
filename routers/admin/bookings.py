@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import uuid
+import urllib.parse
 from datetime import datetime, timezone
 
 import stripe
@@ -55,17 +56,27 @@ async def create_manual_booking(b: Booking, admin=Depends(get_current_admin)):
 async def update_booking(
     booking_id: str, updates: BookingUpdate, admin=Depends(get_current_admin)
 ):
+    # DECODIFICA l'ID per gestire @ e caratteri speciali dai log iCal (%40 -> @)
+    decoded_id = urllib.parse.unquote(booking_id)
+    
     patch = updates.model_dump(exclude_unset=True)
     if not patch:
         raise HTTPException(400, 'No fields to update')
     
-    await db.bookings.update_one({'id': booking_id}, {'$set': patch})
-    return await db.bookings.find_one({'id': booking_id}, {'_id': 0})
+    # Esegui l'aggiornamento usando l'ID decodificato
+    result = await db.bookings.update_one({'id': decoded_id}, {'$set': patch})
+    
+    # Se non trova corrispondenza, prova per sicurezza con l'ID originale
+    if result.matched_count == 0 and decoded_id != booking_id:
+        await db.bookings.update_one({'id': booking_id}, {'$set': patch})
+
+    return await db.bookings.find_one({'id': decoded_id}, {'_id': 0})
 
 
 @router.delete("/admin/bookings/{booking_id}")
 async def delete_booking(booking_id: str, admin=Depends(get_current_admin)):
-    await db.bookings.delete_one({'id': booking_id})
+    decoded_id = urllib.parse.unquote(booking_id)
+    await db.bookings.delete_one({'id': decoded_id})
     return {'ok': True}
 
 
@@ -73,7 +84,8 @@ async def delete_booking(booking_id: str, admin=Depends(get_current_admin)):
 async def cancel_and_refund(
     booking_id: str, payload: RefundRequest, admin=Depends(get_current_admin)
 ):
-    b = await db.bookings.find_one({'id': booking_id}, {'_id': 0})
+    decoded_id = urllib.parse.unquote(booking_id)
+    b = await db.bookings.find_one({'id': decoded_id}, {'_id': 0})
     if not b:
         raise HTTPException(404, 'Booking not found')
     
@@ -83,7 +95,7 @@ async def cancel_and_refund(
     refund_obj = None
     if refund_amount > 0:
         tx = await db.payment_transactions.find_one(
-            {'booking_id': booking_id, 'payment_status': 'paid'}, {'_id': 0}
+            {'booking_id': decoded_id, 'payment_status': 'paid'}, {'_id': 0}
         )
         pi = (tx or {}).get('payment_intent_id') or b.get('payment_intent_id')
         if not pi:
@@ -101,7 +113,7 @@ async def cancel_and_refund(
             raise HTTPException(500, f'Rimborso fallito: {e}')
 
     await db.bookings.update_one(
-        {'id': booking_id},
+        {'id': decoded_id},
         {'$set': {
             'status': 'cancelled',
             'payment_status': 'refunded' if refund_amount > 0 else b.get('payment_status', 'unpaid'),
@@ -114,7 +126,8 @@ async def cancel_and_refund(
 
 @router.post("/admin/bookings/{booking_id}/balance-reminder")
 async def balance_reminder(booking_id: str, admin=Depends(get_current_admin)):
-    b = await db.bookings.find_one({'id': booking_id}, {'_id': 0})
+    decoded_id = urllib.parse.unquote(booking_id)
+    b = await db.bookings.find_one({'id': decoded_id}, {'_id': 0})
     if not b:
         raise HTTPException(404, 'Booking not found')
     settings = await get_settings()
@@ -124,7 +137,7 @@ async def balance_reminder(booking_id: str, admin=Depends(get_current_admin)):
         email_balance_reminder_html(b, settings),
     )
     await db.bookings.update_one(
-        {'id': booking_id},
+        {'id': decoded_id},
         {'$set': {'last_reminder_at': datetime.now(timezone.utc).isoformat()}},
     )
     return {'ok': ok}
