@@ -26,5 +26,7 @@ async def update_message(
 
 @router.delete("/admin/messages/{msg_id}")
 async def delete_message(msg_id: str, admin=Depends(get_current_admin)):
-    await db.contact_messages.delete_one({'id': msg_id})
+    result = await db.contact_messages.delete_one({'id': msg_id})
+    if result.deleted_count == 0:
+        raise HTTPException(404, 'Messaggio non trovato')
     return {'ok': True}
