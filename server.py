@@ -19,7 +19,7 @@ from db import db, get_settings, ICAL_SYNC_INTERVAL_HOURS
 from ical_service import ical_sync_run
 from models import VillaSettings, GalleryImage  # Aggiunto GalleryImage
 from routers.admin import router as admin_router
-from routers.payments import router as payments_router
+from routers.payments import router as payments_router, cleanup_expired_bookings
 from routers.public import router as public_router
 
 load_dotenv()
@@ -67,6 +67,7 @@ async def on_startup():
     # Background iCal scheduler
     async def _start_scheduler():
         asyncio.create_task(_ical_scheduler_loop())
+        asyncio.create_task(_cleanup_scheduler_loop())
     await _start_scheduler()
 
 
@@ -81,6 +82,17 @@ async def _ical_scheduler_loop():
         except Exception as e:
             logging.exception(f'Scheduled iCal sync failed: {e}')
         await asyncio.sleep(ICAL_SYNC_INTERVAL_HOURS * 3600)
+
+
+async def _cleanup_scheduler_loop():
+    """Gira ogni 5 minuti e rimuove le prenotazioni pending abbandonate."""
+    await asyncio.sleep(60)  # attesa iniziale
+    while True:
+        try:
+            await cleanup_expired_bookings()
+        except Exception as e:
+            logging.exception(f'Cleanup scheduler failed: {e}')
+        await asyncio.sleep(5 * 60)  # ogni 5 minuti
 
 
 @app.on_event("shutdown")
