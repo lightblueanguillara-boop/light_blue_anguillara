@@ -58,3 +58,9 @@ async def send_marketing(payload: MarketingEmail, admin=Depends(get_current_admi
 @router.get("/admin/marketing/logs")
 async def marketing_logs(admin=Depends(get_current_admin)):
     return await db.marketing_logs.find({}, {'_id': 0}).sort('created_at', -1).to_list(500)
+
+
+@router.delete("/admin/marketing/logs/{log_id}")
+async def delete_marketing_log(log_id: str, admin=Depends(get_current_admin)):
+    await db.marketing_logs.delete_one({'id': log_id})
+    return {'ok': True}
