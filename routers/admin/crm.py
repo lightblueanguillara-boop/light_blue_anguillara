@@ -43,9 +43,12 @@ async def send_marketing(payload: MarketingEmail, admin=Depends(get_current_admi
         except Exception as e:
             failed += 1
             errors.append(str(e))
+    
+    # MODIFICATO: Salviamo anche l'HTML nel log per poterlo riutilizzare
     log_doc = {
         'id': str(uuid.uuid4()),
         'subject': payload.subject,
+        'html_content': payload.html_content, 
         'sent_count': sent,
         'failed_count': failed,
         'total': len(subs),
