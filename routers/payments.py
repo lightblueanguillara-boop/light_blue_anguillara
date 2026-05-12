@@ -23,8 +23,8 @@ async def cleanup_expired_bookings():
     NON tocca le prenotazioni manuali o esterne.
     """
     try:
-        # Limite di 30 minuti fa
-        cutoff_dt = datetime.now(timezone.utc) - timedelta(minutes=30)
+        # Limite di 10 minuti fa (allineato alla durata reale del checkout Stripe)
+        cutoff_dt = datetime.now(timezone.utc) - timedelta(minutes=10)
         cutoff_iso = cutoff_dt.isoformat()
         
         # FILTRO DI PROTEZIONE: 
@@ -141,7 +141,7 @@ async def create_booking_checkout(payload: BookingCreate, request: Request, back
             mode='payment',
             expires_at=int((datetime.now(timezone.utc) + timedelta(minutes=31)).timestamp()),
             success_url=f"{host_url}/payment/success?session_id={{CHECKOUT_SESSION_ID}}",
-            cancel_url=f"{host_url}/payment/cancel",
+            cancel_url=f"{host_url}/payment/cancel?session_id={{CHECKOUT_SESSION_ID}}",
             metadata={
                 'booking_id': booking.id,
                 'payment_choice': payload.payment_choice,
@@ -164,6 +164,34 @@ async def create_booking_checkout(payload: BookingCreate, request: Request, back
     await db.payment_transactions.insert_one(tx.model_dump())
 
     return {'url': session.url, 'session_id': session.id, 'booking_id': booking.id, 'amount': amount}
+
+
+@router.delete("/bookings/checkout/{session_id}")
+async def cancel_booking_checkout(session_id: str):
+    """
+    Chiamato dal frontend quando l'utente torna indietro da Stripe o chiude la pagina.
+    Libera immediatamente le date cancellando la prenotazione pending.
+    """
+    tx = await db.payment_transactions.find_one({'session_id': session_id})
+    if not tx:
+        return {'cancelled': False, 'reason': 'transaction not found'}
+
+    booking = await db.bookings.find_one({'id': tx['booking_id']})
+    if not booking:
+        await db.payment_transactions.delete_one({'session_id': session_id})
+        return {'cancelled': False, 'reason': 'booking not found'}
+
+    # Protezione: cancelliamo solo pending non pagati dal sito
+    if booking.get('status') != 'pending' or booking.get('payment_status') != 'unpaid':
+        return {'cancelled': False, 'reason': 'booking already processed'}
+
+    if booking.get('source') != 'website':
+        return {'cancelled': False, 'reason': 'not a website booking'}
+
+    await db.bookings.delete_one({'id': tx['booking_id']})
+    await db.payment_transactions.delete_one({'session_id': session_id})
+    logging.info(f"Cancel checkout: rimossa prenotazione {tx['booking_id']} (session {session_id})")
+    return {'cancelled': True}
 
 
 @router.get("/payments/status/{session_id}")
