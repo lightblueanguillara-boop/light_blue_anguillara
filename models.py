@@ -83,7 +83,7 @@ class Subscriber(BaseModel):
 class SeasonalRate(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str
-    start_date: str  
+    start_date: str
     end_date: str
     price_per_night: float
     priority: int = 1
@@ -101,31 +101,18 @@ class VillaSettings(BaseModel):
     villa_email: str = 'info@lightblue-anguillara.it'
     villa_cir: str = 'IT058005C2MZEX4AR8'
     villa_lake: str = 'Lago di Bracciano'
-    villa_description: str = "..." # (testo abbreviato per brevità)
+    villa_description: str = "Descrizione Villa..."
     seasonal_rates: List[SeasonalRate] = []
     last_minute_enabled: bool = False
     last_minute_window_days: int = 14
     last_minute_discount_percent: float = 15.0
-    last_minute_title: str = 'Last Minute · prossime date libere'
-    last_minute_subtitle: str = 'Approfitta dello sconto sulle prossime due settimane'
-
-class PaymentTransaction(BaseModel):
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    session_id: str
-    booking_id: str
-    amount: float
-    currency: str = 'eur'
-    payment_status: str = 'initiated'
-    status: str = 'open'
-    payment_intent_id: Optional[str] = None
-    metadata: dict = {}
-    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    last_minute_title: str = 'Last Minute'
+    last_minute_subtitle: str = 'Sconto prossime date'
 
 class MarketingEmail(BaseModel):
     subject: str
     html_content: str
-    recipients: Optional[List[str]] = None      # AGGIUNTO: Per invio tramite email
-    recipient_ids: Optional[List[str]] = None   # Per invio tramite ID
+    recipients: List[EmailStr] # Fondamentale: coincide con selectedEmails inviato dal JSX
 
 class RefundRequest(BaseModel):
     amount: Optional[float] = None
@@ -134,30 +121,15 @@ class RefundRequest(BaseModel):
 class BookingUpdate(BaseModel):
     status: Optional[Literal['pending', 'confirmed', 'cancelled', 'external']] = None
     payment_status: Optional[Literal['unpaid', 'deposit_paid', 'fully_paid', 'refunded']] = None
-    cancellation_policy: Optional[Literal['flexible', 'moderate', 'strict']] = None
     guest_name: Optional[str] = None
     guest_email: Optional[EmailStr] = None
-    guest_phone: Optional[str] = None
-    adults: Optional[int] = None
-    children: Optional[int] = None
-    notes: Optional[str] = None
     check_in: Optional[str] = None
     check_out: Optional[str] = None
-    total_price: Optional[float] = None
-    deposit_amount: Optional[float] = None
 
     @field_validator('check_in', 'check_out')
     @classmethod
     def _date_format(cls, v):
         return _validate_iso_date(v)
-
-class MessageUpdate(BaseModel):
-    status: Optional[Literal['new', 'read', 'replied']] = None
-
-class SettingsUpdate(BaseModel):
-    # ... (campi esistenti per settings)
-    default_price_per_night: Optional[float] = None
-    # ... aggiungi gli altri come nel tuo file originale
 
 class GalleryImage(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -167,8 +139,3 @@ class GalleryImage(BaseModel):
     category: Literal['gallery', 'home', 'rooms', 'general'] = 'general'
     order: int = 0
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-
-class GalleryImageUpdate(BaseModel):
-    caption: Optional[str] = None
-    category: Optional[Literal['gallery', 'home', 'rooms', 'general']] = None
-    order: Optional[int] = None
