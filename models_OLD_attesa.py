@@ -3,6 +3,7 @@ from typing import List, Optional, Literal
 from pydantic import BaseModel, Field, EmailStr, field_validator
 import uuid
 
+
 def _validate_iso_date(v: Optional[str]) -> Optional[str]:
     if v is None:
         return v
@@ -12,9 +13,11 @@ def _validate_iso_date(v: Optional[str]) -> Optional[str]:
     except (ValueError, TypeError):
         raise ValueError('Date must be in YYYY-MM-DD format')
 
+
 class AdminLogin(BaseModel):
     email: EmailStr
     password: str
+
 
 class Booking(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -39,6 +42,7 @@ class Booking(BaseModel):
     last_reminder_at: Optional[str] = None
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
+
 class BookingCreate(BaseModel):
     guest_name: str
     guest_email: EmailStr
@@ -52,6 +56,7 @@ class BookingCreate(BaseModel):
     consent_newsletter: bool = False
     origin_url: str
 
+
 class ContactMessage(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str
@@ -63,6 +68,7 @@ class ContactMessage(BaseModel):
     status: Literal['new', 'read', 'replied'] = 'new'
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
+
 class ContactCreate(BaseModel):
     name: str
     email: EmailStr
@@ -70,6 +76,7 @@ class ContactCreate(BaseModel):
     subject: Optional[str] = None
     message: str
     consent_newsletter: bool = False
+
 
 class Subscriber(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -80,6 +87,7 @@ class Subscriber(BaseModel):
     consent_date: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
+
 class SeasonalRate(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str
@@ -87,6 +95,7 @@ class SeasonalRate(BaseModel):
     end_date: str
     price_per_night: float
     priority: int = 1
+
 
 class VillaSettings(BaseModel):
     id: str = 'global'
@@ -115,6 +124,7 @@ class VillaSettings(BaseModel):
     last_minute_title: str = 'Last Minute · prossime date libere'
     last_minute_subtitle: str = 'Approfitta dello sconto sulle prossime due settimane'
 
+
 class PaymentTransaction(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     session_id: str
@@ -127,14 +137,19 @@ class PaymentTransaction(BaseModel):
     metadata: dict = {}
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
+
 class MarketingEmail(BaseModel):
     subject: str
     html_content: str
     recipient_ids: Optional[List[str]] = None
 
+
 class RefundRequest(BaseModel):
     amount: Optional[float] = None
     reason: Optional[str] = None
+
+
+# ---------- Update models (PATCH safety) ----------
 
 class BookingUpdate(BaseModel):
     status: Optional[Literal['pending', 'confirmed', 'cancelled', 'external']] = None
@@ -156,8 +171,10 @@ class BookingUpdate(BaseModel):
     def _date_format(cls, v):
         return _validate_iso_date(v)
 
+
 class MessageUpdate(BaseModel):
     status: Optional[Literal['new', 'read', 'replied']] = None
+
 
 class SettingsUpdate(BaseModel):
     default_price_per_night: Optional[float] = None
@@ -179,16 +196,21 @@ class SettingsUpdate(BaseModel):
     last_minute_title: Optional[str] = None
     last_minute_subtitle: Optional[str] = None
 
+
+# ---------- Gallery & Image Management ----------
+
 class GalleryImage(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    url: str
-    public_id: str
+    url: str                # L'indirizzo dell'immagine (es. Cloudinary)
+    public_id: str          # ID interno per eliminazione/gestione remota
     caption: Optional[str] = ""
     category: Literal['gallery', 'home', 'rooms', 'general'] = 'general'
-    order: int = 0
+    order: int = 0          # Per gestire la sequenza di visualizzazione
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
+
 class GalleryImageUpdate(BaseModel):
+    """Campi che l'admin può modificare per un'immagine già caricata."""
     caption: Optional[str] = None
     category: Optional[Literal['gallery', 'home', 'rooms', 'general']] = None
     order: Optional[int] = None
