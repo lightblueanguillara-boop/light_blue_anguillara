@@ -9,8 +9,6 @@ from auth import get_current_admin
 from db import db, SENDER_EMAIL
 from models import MarketingEmail
 
-resend.api_key = None  # viene inizializzato da email_helpers tramite db, qui usiamo resend direttamente
-
 router = APIRouter()
 
 
