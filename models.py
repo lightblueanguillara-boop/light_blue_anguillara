@@ -52,6 +52,19 @@ class BookingCreate(BaseModel):
     consent_newsletter: bool = False
     origin_url: str
 
+class BookingUpdate(BaseModel):
+    status: Optional[Literal['pending', 'confirmed', 'cancelled', 'external']] = None
+    payment_status: Optional[Literal['unpaid', 'deposit_paid', 'fully_paid', 'refunded']] = None
+    guest_name: Optional[str] = None
+    guest_email: Optional[EmailStr] = None
+    check_in: Optional[str] = None
+    check_out: Optional[str] = None
+
+    @field_validator('check_in', 'check_out')
+    @classmethod
+    def _date_format(cls, v):
+        return _validate_iso_date(v)
+
 class ContactMessage(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str
@@ -70,6 +83,10 @@ class ContactCreate(BaseModel):
     subject: Optional[str] = None
     message: str
     consent_newsletter: bool = False
+
+# Usato da inbox.py per aggiornare lo stato di un messaggio (new/read/replied)
+class MessageUpdate(BaseModel):
+    status: Optional[Literal['new', 'read', 'replied']] = None
 
 class Subscriber(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -109,27 +126,26 @@ class VillaSettings(BaseModel):
     last_minute_title: str = 'Last Minute'
     last_minute_subtitle: str = 'Sconto prossime date'
 
-class MarketingEmail(BaseModel):
-    subject: str
-    html_content: str
-    recipients: List[EmailStr] # Fondamentale: coincide con selectedEmails inviato dal JSX
-
-class RefundRequest(BaseModel):
-    amount: Optional[float] = None
-    reason: Optional[str] = None
-
-class BookingUpdate(BaseModel):
-    status: Optional[Literal['pending', 'confirmed', 'cancelled', 'external']] = None
-    payment_status: Optional[Literal['unpaid', 'deposit_paid', 'fully_paid', 'refunded']] = None
-    guest_name: Optional[str] = None
-    guest_email: Optional[EmailStr] = None
-    check_in: Optional[str] = None
-    check_out: Optional[str] = None
-
-    @field_validator('check_in', 'check_out')
-    @classmethod
-    def _date_format(cls, v):
-        return _validate_iso_date(v)
+# Usato da operations.py per aggiornare le impostazioni globali della villa
+class SettingsUpdate(BaseModel):
+    default_price_per_night: Optional[float] = None
+    deposit_percent: Optional[float] = None
+    default_cancellation_policy: Optional[Literal['flexible', 'moderate', 'strict']] = None
+    ical_airbnb_url: Optional[str] = None
+    ical_booking_url: Optional[str] = None
+    villa_name: Optional[str] = None
+    villa_address: Optional[str] = None
+    villa_phone: Optional[str] = None
+    villa_email: Optional[str] = None
+    villa_cir: Optional[str] = None
+    villa_lake: Optional[str] = None
+    villa_description: Optional[str] = None
+    seasonal_rates: Optional[List[SeasonalRate]] = None
+    last_minute_enabled: Optional[bool] = None
+    last_minute_window_days: Optional[int] = None
+    last_minute_discount_percent: Optional[float] = None
+    last_minute_title: Optional[str] = None
+    last_minute_subtitle: Optional[str] = None
 
 class GalleryImage(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -138,4 +154,30 @@ class GalleryImage(BaseModel):
     caption: Optional[str] = ""
     category: Literal['gallery', 'home', 'rooms', 'general'] = 'general'
     order: int = 0
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+# Usato da operations.py per aggiornare i metadati di un'immagine
+class GalleryImageUpdate(BaseModel):
+    caption: Optional[str] = None
+    category: Optional[Literal['gallery', 'home', 'rooms', 'general']] = None
+    order: Optional[int] = None
+
+class MarketingEmail(BaseModel):
+    subject: str
+    html_content: str
+    recipients: List[EmailStr]  # coincide con selectedEmails inviato dal JSX
+
+class RefundRequest(BaseModel):
+    amount: Optional[float] = None
+    reason: Optional[str] = None
+
+class PaymentTransaction(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    session_id: str
+    booking_id: str
+    amount: float
+    payment_status: Literal['initiated', 'paid', 'unpaid', 'failed'] = 'initiated'
+    status: Literal['open', 'complete', 'expired', 'cancelled'] = 'open'
+    payment_intent_id: Optional[str] = None
+    metadata: dict = {}
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
