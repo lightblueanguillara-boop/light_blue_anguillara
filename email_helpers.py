@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import resend
 
 from db import RESEND_API_KEY, SENDER_EMAIL
@@ -16,6 +16,84 @@ def _it_date(iso: str) -> str:
         return datetime.strptime(iso, '%Y-%m-%d').strftime('%d-%m-%Y')
     except (ValueError, TypeError):
         return iso
+
+
+def _cancellation_policy_info(booking: dict, settings: dict) -> dict:
+    """
+    Restituisce il testo descrittivo della politica di cancellazione
+    e la data ultima entro cui è possibile disdire con rimborso completo.
+
+    La politica viene letta in questo ordine:
+      1. booking['cancellation_policy'] (salvato al momento della prenotazione)
+      2. settings['default_cancellation_policy'] (fallback dalle impostazioni)
+      3. 'moderate' (default assoluto)
+
+    Regole (allineate a compute_refund_amount in pricing.py):
+      - flexible : rimborso 100% fino a 24h prima del check-in
+      - moderate : rimborso 100% fino a 5 giorni prima del check-in;
+                   50% da 1 a 5 giorni; 0% nelle ultime 24h
+      - strict   : rimborso 100% entro 48h dalla prenotazione E
+                   almeno 14 giorni prima del check-in;
+                   50% fino a 7 giorni prima; 0% oltre
+    """
+    policy = (
+        booking.get('cancellation_policy')
+        or settings.get('default_cancellation_policy')
+        or 'moderate'
+    )
+
+    try:
+        check_in_dt = datetime.strptime(booking['check_in'], '%Y-%m-%d').replace(tzinfo=timezone.utc)
+    except (KeyError, ValueError, TypeError):
+        check_in_dt = None
+
+    labels = {
+        'flexible': 'Flessibile',
+        'moderate': 'Moderata',
+        'strict':   'Rigorosa',
+    }
+    label = labels.get(policy, policy.capitalize())
+
+    if policy == 'flexible':
+        description = (
+            'Rimborso completo (100%) se disdici almeno 24 ore prima del check-in. '
+            'Nessun rimborso nelle ultime 24 ore.'
+        )
+        deadline_dt = check_in_dt - timedelta(hours=24) if check_in_dt else None
+        deadline_label = 'Disdetta gratuita entro le ore 00:00 del'
+
+    elif policy == 'moderate':
+        description = (
+            'Rimborso completo (100%) se disdici almeno 5 giorni prima del check-in. '
+            'Rimborso del 50% da 1 a 5 giorni prima. '
+            'Nessun rimborso nelle ultime 24 ore.'
+        )
+        deadline_dt = check_in_dt - timedelta(days=5) if check_in_dt else None
+        deadline_label = 'Disdetta gratuita entro'
+
+    else:  # strict
+        description = (
+            'Rimborso completo (100%) solo se disdici entro 48 ore dalla prenotazione '
+            'E almeno 14 giorni prima del check-in. '
+            'Rimborso del 50% fino a 7 giorni prima del check-in. '
+            'Nessun rimborso oltre.'
+        )
+        # Per la "strict" il termine più favorevole al cliente è 14gg prima del check-in
+        deadline_dt = check_in_dt - timedelta(days=14) if check_in_dt else None
+        deadline_label = 'Disdetta gratuita entro'
+
+    if deadline_dt:
+        deadline_str = deadline_dt.strftime('%d/%m/%Y')
+        deadline_text = f'{deadline_label} il <strong>{deadline_str}</strong>'
+    else:
+        deadline_text = ''
+
+    return {
+        'policy':      policy,
+        'label':       label,
+        'description': description,
+        'deadline_text': deadline_text,
+    }
 
 
 async def send_email_async(to_email: str, subject: str, html: str) -> bool:
@@ -36,6 +114,20 @@ def email_booking_confirmation_html(booking: dict, settings: dict) -> str:
     balance_row = ''
     if balance > 0:
         balance_row = f"<tr><td style='padding:8px 0;color:#5C6A79'>Saldo da versare</td><td style='padding:8px 0;text-align:right'>€{balance}</td></tr>"
+
+    # Recupera testo politica e data limite calcolata dinamicamente
+    pol = _cancellation_policy_info(booking, settings)
+
+    cancellation_block = f"""
+      <tr style="border-top:1px solid #E5E0D8">
+        <td colspan="2" style="padding:16px 0 4px 0">
+          <strong style="color:#2A333C">Politica di cancellazione: {pol['label']}</strong><br/>
+          <span style="color:#5C6A79;font-size:13px">{pol['description']}</span>
+          {"<br/><span style='color:#7A93AC;font-size:13px;margin-top:4px;display:inline-block'>" + pol['deadline_text'] + "</span>" if pol['deadline_text'] else ""}
+        </td>
+      </tr>
+    """
+
     return f"""
     <div style="font-family:Manrope,Arial,sans-serif;max-width:560px;margin:0 auto;padding:32px;background:#FAF9F6;color:#2A333C">
       <h1 style="font-family:'Outfit',sans-serif;font-weight:300;font-size:28px;letter-spacing:-0.5px">Prenotazione confermata</h1>
@@ -48,8 +140,8 @@ def email_booking_confirmation_html(booking: dict, settings: dict) -> str:
         <tr><td style="padding:8px 0;color:#5C6A79">Totale soggiorno</td><td style="padding:8px 0;text-align:right">€{booking.get('total_price')}</td></tr>
         <tr style="border-top:1px solid #E5E0D8"><td style="padding:12px 0;color:#5C6A79">Pagato ora</td><td style="padding:12px 0;text-align:right;color:#7A93AC"><strong>€{paid}</strong></td></tr>
         {balance_row}
+        {cancellation_block}
       </table>
-      <p>Politica di cancellazione: <strong>{booking.get('cancellation_policy')}</strong></p>
       <p>A presto,<br/>{villa}</p>
       <p style="color:#5C6A79;font-size:12px;margin-top:32px">{settings.get('villa_address','')}<br/>CIR {settings.get('villa_cir','')}</p>
     </div>
