@@ -25,8 +25,11 @@ cloudinary.config(
 
 @router.get("/admin/analytics")
 async def analytics(admin=Depends(get_current_admin)):
-    # 1. Recupero TUTTE le prenotazioni
-    bookings = await db.bookings.find({}, {'_id': 0}).to_list(10000)
+    # MODIFICA: Filtriamo le prenotazioni per includere solo quelle confermate o esterne.
+    # Questo esclude le 'pending' (non pagate) e le 'cancelled'.
+    query = {"status": {"$in": ["confirmed", "external"]}}
+    bookings = await db.bookings.find(query, {'_id': 0}).to_list(10000)
+    
     now = datetime.now(timezone.utc).date()
     
     months = []
@@ -37,103 +40,74 @@ async def analytics(admin=Depends(get_current_admin)):
     for i in range(11, -1, -1):
         # Calcolo mese per mese andando a ritroso
         target_date = (base_date - timedelta(days=i*31)).replace(day=1)
-        key = f"{target_date.year}-{target_date.month}"
-        month_map[key] = len(months)
+        m_key = target_date.strftime('%Y-%m')
+        m_label = target_date.strftime('%b') # Esempio: Jan, Feb...
         
-        months.append({
-            'year': target_date.year, 
-            'month': target_date.month, 
-            'label': target_date.strftime('%b %Y'),
-            'nights': 0, 
-            'revenue': 0.0
-        })
+        entry = {"name": m_label, "guadagni": 0, "notti": 0}
+        months.append(entry)
+        month_map[m_key] = entry
 
-    total_revenue_accumulated = 0.0
+    total_revenue = 0
+    total_nights = 0
 
-    # 3. Elaborazione dei dati
+    # 3. Aggregazione dati
     for b in bookings:
-        # Filtriamo stati non validi (includiamo però confirmed, pending, external)
-        status = b.get('status')
-        if status in ['cancelled', 'deleted']:
-            continue
-
         try:
-            # Prezzo totale
-            price_val = float(b.get('total_price', 0))
-            total_revenue_accumulated += price_val
+            # Calcolo notti e ricavo totale
+            check_in = datetime.strptime(b['check_in'], '%Y-%m-%d').date()
+            check_out = datetime.strptime(b['check_out'], '%Y-%m-%d').date()
+            notti = (check_out - check_in).days
+            prezzo = float(b.get('total_price', 0))
 
-            # Pulizia radicale delle date (fondamentale per server US/California)
-            # Prendiamo solo i primi 10 caratteri "YYYY-MM-DD"
-            raw_in = b.get('check_in')
-            if not raw_in:
-                continue
-            
-            date_str_in = str(raw_in)[:10]
-            dt_in = datetime.strptime(date_str_in, '%Y-%m-%d').date()
-            
-            # Chiave per la mappa: "2026-5"
-            key = f"{dt_in.year}-{dt_in.month}"
-            
-            if key in month_map:
-                idx = month_map[key]
-                # Assegniamo il ricavo al mese del check-in
-                months[idx]['revenue'] = round(months[idx]['revenue'] + price_val, 2)
-                
-                # Calcolo notti per il grafico occupazione
-                raw_out = b.get('check_out')
-                if raw_out:
-                    date_str_out = str(raw_out)[:10]
-                    dt_out = datetime.strptime(date_str_out, '%Y-%m-%d').date()
-                    diff = (dt_out - dt_in).days
-                    months[idx]['nights'] += max(0, diff)
-                        
+            total_revenue += prezzo
+            total_nights += notti
+
+            # Distribuzione nei grafici mensili (basata sul check-in)
+            m_key = check_in.strftime('%Y-%m')
+            if m_key in month_map:
+                month_map[m_key]["guadagni"] += prezzo
+                month_map[m_key]["notti"] += notti
         except Exception as e:
-            logging.error(f"Errore calcolo booking: {e}")
+            logging.error(f"Errore processamento analytics per booking {b.get('id')}: {e}")
             continue
 
     return {
-        'monthly': months,
-        'totals': {
-            'revenue': round(total_revenue_accumulated, 2),
-            'nights': sum(m['nights'] for m in months),
-            'confirmed_bookings': sum(1 for b in bookings if b.get('status') == 'confirmed'),
-            'pending_bookings': sum(1 for b in bookings if b.get('status') == 'pending'),
-            'external_bookings': sum(1 for b in bookings if b.get('status') == 'external'),
-            'new_messages': await db.contact_messages.count_documents({'status': 'new'}),
-        },
+        "total_revenue": round(total_revenue, 2),
+        "total_nights": total_nights,
+        "bookings_count": len(bookings),
+        "chart_data": months
     }
 
-# --- Gestione Settings ---
 @router.get("/admin/settings")
-async def get_admin_settings(admin=Depends(get_current_admin)):
+async def fetch_settings(admin=Depends(get_current_admin)):
     return await get_settings()
 
 @router.put("/admin/settings")
-async def update_admin_settings(updates: SettingsUpdate, admin=Depends(get_current_admin)):
+async def update_settings(updates: SettingsUpdate, admin=Depends(get_current_admin)):
     patch = updates.model_dump(exclude_unset=True)
-    if not patch: raise HTTPException(400, 'No fields to update')
-    await db.settings.update_one({'id': 'global'}, {'$set': patch}, upsert=True)
-    return await get_settings()
+    await db.settings.update_one({}, {"$set": patch}, upsert=True)
+    return {"ok": True}
 
-# --- Sincronizzazione iCal ---
 @router.post("/admin/ical/sync")
-async def ical_sync(admin=Depends(get_current_admin)):
-    return await ical_sync_run()
+async def sync_ical_now(admin=Depends(get_current_admin)):
+    imported = await ical_sync_run()
+    return {"ok": True, "imported": imported}
 
-# --- Gestione Galleria Immagini ---
-@router.get("/admin/gallery", response_model=List[GalleryImage])
-async def list_gallery_images(admin=Depends(get_current_admin)):
-    return await db.gallery.find({}, {'_id': 0}).sort("order", 1).to_list(1000)
+# --- GALLERY MANAGEMENT ---
 
-@router.post("/admin/gallery/upload", response_model=GalleryImage)
+@router.get("/gallery", response_model=List[GalleryImage])
+async def get_gallery():
+    return await db.gallery.find({}, {'_id': 0}).sort('order', 1).to_list(1000)
+
+@router.post("/admin/gallery", response_model=GalleryImage)
 async def upload_gallery_image(
     file: UploadFile = File(...),
-    category: str = Form("gallery"),
-    caption: Optional[str] = Form(""),
+    caption: str = Form(\"\"),
+    category: str = Form(\"general\"),
     admin=Depends(get_current_admin)
 ):
     try:
-        upload_result = cloudinary.uploader.upload(file.file, folder="light_blue_gallery")
+        upload_result = cloudinary.uploader.upload(file.file, folder=\"light_blue_gallery\")
         new_image = GalleryImage(
             url=upload_result['secure_url'],
             public_id=upload_result['public_id'],
@@ -146,23 +120,23 @@ async def upload_gallery_image(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.patch("/admin/gallery/{image_id}", response_model=GalleryImage)
+@router.patch(\"/admin/gallery/{image_id}\", response_model=GalleryImage)
 async def update_image_info(image_id: str, updates: GalleryImageUpdate, admin=Depends(get_current_admin)):
     patch = updates.model_dump(exclude_unset=True)
     result = await db.gallery.find_one_and_update(
-        {"id": image_id}, {"$set": patch},
+        {\"id\": image_id}, {\"$set\": patch},
         projection={'_id': 0}, return_document=True
     )
-    if not result: raise HTTPException(404, "Immagine non trovata")
+    if not result: raise HTTPException(404, \"Immagine non trovata\")
     return result
 
-@router.delete("/admin/gallery/{image_id}")
+@router.delete(\"/admin/gallery/{image_id}\")
 async def delete_gallery_image(image_id: str, admin=Depends(get_current_admin)):
-    image = await db.gallery.find_one({"id": image_id})
-    if not image: raise HTTPException(404, "Immagine non trovata")
+    image = await db.gallery.find_one({\"id\": image_id})
+    if not image: raise HTTPException(404, \"Immagine non trovata\")
     try:
         cloudinary.uploader.destroy(image['public_id'])
-        await db.gallery.delete_one({"id": image_id})
-        return {"status": "success", "message": "Eliminata correttamente"}
+        await db.gallery.delete_one({\"id\": image_id})
+        return {\"ok\": True}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(500, str(e))
