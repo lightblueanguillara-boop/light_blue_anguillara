@@ -162,6 +162,50 @@ def email_balance_reminder_html(booking: dict, settings: dict) -> str:
     """
 
 
+def email_cancellation_html(booking: dict, settings: dict) -> str:
+    """Email di cancellazione prenotazione — stessa grafica della conferma."""
+    villa = settings.get('villa_name', 'Light Blue')
+    total_paid = 0.0
+    if booking.get('payment_status') == 'deposit_paid':
+        total_paid = booking.get('deposit_amount', 0)
+    elif booking.get('payment_status') == 'fully_paid':
+        total_paid = booking.get('total_price', 0)
+
+    refund_row = ''
+    if total_paid and total_paid > 0:
+        refund_row = f"""
+        <tr style="border-top:1px solid #E5E0D8">
+          <td colspan="2" style="padding:16px 0 4px 0">
+            <strong style="color:#2A333C">Rimborso</strong><br/>
+            <span style="color:#5C6A79;font-size:13px">
+              Il rimborso di <strong>€{total_paid}</strong> verrà accreditato entro
+              <strong>5 giorni lavorativi</strong> sul metodo di pagamento originale.
+            </span>
+          </td>
+        </tr>"""
+
+    return f"""
+    <div style="font-family:Manrope,Arial,sans-serif;max-width:560px;margin:0 auto;padding:32px;background:#FAF9F6;color:#2A333C">
+      <h1 style="font-family:'Outfit',sans-serif;font-weight:300;font-size:28px;letter-spacing:-0.5px">Prenotazione cancellata</h1>
+      <p>Ciao {booking.get('guest_name')},</p>
+      <p>la tua prenotazione presso <strong>{villa}</strong> è stata cancellata.</p>
+      <table style="width:100%;border-collapse:collapse;margin:24px 0">
+        <tr><td style="padding:8px 0;color:#5C6A79">Check-in</td><td style="padding:8px 0;text-align:right"><strong>{_it_date(booking.get('check_in'))}</strong></td></tr>
+        <tr><td style="padding:8px 0;color:#5C6A79">Check-out</td><td style="padding:8px 0;text-align:right"><strong>{_it_date(booking.get('check_out'))}</strong></td></tr>
+        <tr><td style="padding:8px 0;color:#5C6A79">Ospiti</td><td style="padding:8px 0;text-align:right">{booking.get('adults', 1)} adulti, {booking.get('children', 0)} bambini</td></tr>
+        <tr><td style="padding:8px 0;color:#5C6A79">Totale soggiorno</td><td style="padding:8px 0;text-align:right">€{booking.get('total_price')}</td></tr>
+        {refund_row}
+      </table>
+      <p style="color:#5C6A79;font-size:14px">
+        Per qualsiasi domanda o chiarimento non esitare a contattarci rispondendo a questa email
+        o al numero indicato sul sito.
+      </p>
+      <p>A presto,<br/>{villa}</p>
+      <p style="color:#5C6A79;font-size:12px;margin-top:32px">{settings.get('villa_address','')}<br/>CIR {settings.get('villa_cir','')}</p>
+    </div>
+    """
+
+
 def email_admin_contact_notification_html(msg: dict) -> str:
     return f"""
     <div style="font-family:Manrope,Arial,sans-serif;max-width:560px;margin:0 auto;padding:32px;color:#2A333C">
