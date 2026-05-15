@@ -95,7 +95,14 @@ async def create_booking_checkout(payload: BookingCreate, request: Request, back
         raise HTTPException(409, 'Date non disponibili')
 
     pricing = await compute_stay_pricing(payload.check_in, payload.check_out)
+    # ---------------------------------------------------------------
+    # FIX: leggiamo la politica di cancellazione dalle impostazioni
+    # globali della villa, così che rispecchi sempre quanto configurato
+    # nella dashboard e non un valore hardcoded del modello.
+    # ---------------------------------------------------------------
     settings = await get_settings()
+    cancellation_policy = settings.get('default_cancellation_policy', 'moderate')
+
     amount = pricing['total'] if payload.payment_choice == 'full' else pricing['deposit_amount']
     amount_cents = int(round(amount * 100))
 
@@ -110,9 +117,13 @@ async def create_booking_checkout(payload: BookingCreate, request: Request, back
         total_price=pricing['total'],
         deposit_amount=pricing['deposit_amount'],
         payment_choice=payload.payment_choice,
+        # -------------------------------------------------------
+        # FIX: cancellation_policy letta dinamicamente dalle settings
+        # -------------------------------------------------------
+        cancellation_policy=cancellation_policy,
         status='pending',
         payment_status='unpaid',
-        source='website', # <--- Specifichiamo che viene dal sito
+        source='website',  # <--- Specifichiamo che viene dal sito
         notes=payload.notes,
         consent_newsletter=payload.consent_newsletter,
     )
