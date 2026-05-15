@@ -28,13 +28,14 @@ async def create_manual_booking(payload: dict, admin=Depends(get_current_admin))
     try:
         total_price = float(payload.get('total_price', 0))
         deposit_amount = float(payload.get('deposit_amount', 0))
-        
+
         # Estrazione corretta degli ospiti dal payload inviato dal front-end
         adults = int(payload.get('adults', 2))
         children = int(payload.get('children', 0))
-        
+
         guest_email = payload.get('guest_email')
         placeholder_email = not guest_email or guest_email.strip() == ""
+
         if placeholder_email:
             guest_email = "manual@booking.com"
 
@@ -80,9 +81,16 @@ async def create_manual_booking(payload: dict, admin=Depends(get_current_admin))
                 f"Prenotazione confermata — {settings.get('villa_name', 'Light Blue')}",
                 email_booking_confirmation_html(booking_data, settings),
             ))
-            logging.info(f"Email di conferma inviata per prenotazione manuale {booking_data['id']} a {guest_email}")
+
+            logging.info(
+                f"Email di conferma inviata per prenotazione manuale "
+                f"{booking_data['id']} a {guest_email}"
+            )
         else:
-            logging.info(f"Prenotazione manuale {booking_data['id']} creata senza email ospite — nessuna conferma inviata.")
+            logging.info(
+                f"Prenotazione manuale {booking_data['id']} "
+                f"creata senza email ospite — nessuna conferma inviata."
+            )
 
         return {
             "ok": True,
@@ -90,31 +98,59 @@ async def create_manual_booking(payload: dict, admin=Depends(get_current_admin))
             "booking": booking_data,
             "email_sent": not placeholder_email,
         }
+
     except HTTPException:
         raise
+
     except Exception as e:
         logging.error(f"Errore creazione manuale: {e}")
-        raise HTTPException(500, f"Errore durante il salvataggio: {str(e)}")
+
+        raise HTTPException(
+            500,
+            f"Errore durante il salvataggio: {str(e)}"
+        )
 
 @router.patch("/admin/bookings/{booking_id}")
 async def update_booking(
-    booking_id: str, updates: BookingUpdate, admin=Depends(get_current_admin)
+    booking_id: str,
+    updates: BookingUpdate,
+    admin=Depends(get_current_admin)
 ):
     decoded_id = urllib.parse.unquote(booking_id)
+
     patch = updates.model_dump(exclude_unset=True)
+
     if not patch:
         raise HTTPException(400, 'No fields to update')
-    
-    result = await db.bookings.update_one({'id': decoded_id}, {'$set': patch})
-    if result.matched_count == 0 and decoded_id != booking_id:
-        await db.bookings.update_one({'id': booking_id}, {'$set': patch})
 
-    return await db.bookings.find_one({'id': decoded_id}, {'_id': 0})
+    result = await db.bookings.update_one(
+        {'id': decoded_id},
+        {'$set': patch}
+    )
+
+    if result.matched_count == 0 and decoded_id != booking_id:
+        await db.bookings.update_one(
+            {'id': booking_id},
+            {'$set': patch}
+        )
+
+    return await db.bookings.find_one(
+        {'id': decoded_id},
+        {'_id': 0}
+    )
 
 @router.delete("/admin/bookings/{booking_id}")
-async def delete_booking(booking_id: str, admin=Depends(get_current_admin)):
+async def delete_booking(
+    booking_id: str,
+    admin=Depends(get_current_admin)
+):
     decoded_id = urllib.parse.unquote(booking_id)
-    b = await db.bookings.find_one({'id': decoded_id}, {'_id': 0})
+
+    b = await db.bookings.find_one(
+        {'id': decoded_id},
+        {'_id': 0}
+    )
+
     if not b:
         raise HTTPException(404, 'Booking not found')
 
@@ -129,39 +165,88 @@ async def delete_booking(booking_id: str, admin=Depends(get_current_admin)):
     )
 
     guest_email = b.get('guest_email', '')
-    is_placeholder = not guest_email or guest_email.strip() in ('', 'manual@booking.com')
-    if not is_placeholder:
+
+    is_placeholder = (
+        not guest_email
+        or guest_email.strip() in ('', 'manual@booking.com')
+    )
+
+    # INVIA EMAIL SOLO SE:
+    # - booking confermata
+    # - booking completamente pagata
+    should_send_email = (
+        b.get('status') == 'confirmed'
+        and b.get('payment_status') == 'fully_paid'
+    )
+
+    if not is_placeholder and should_send_email:
         asyncio.create_task(send_email_async(
             guest_email,
             f"Prenotazione cancellata — {settings.get('villa_name', 'Light Blue')}",
             email_cancellation_html(b, settings),
         ))
-        logging.info(f"Email di cancellazione inviata per prenotazione {decoded_id} a {guest_email}")
-    else:
-        logging.info(f"Prenotazione {decoded_id} archiviata senza email ospite — nessuna email inviata.")
 
-    return {'ok': True, 'archived': True, 'email_sent': not is_placeholder}
+        logging.info(
+            f"Email di cancellazione inviata "
+            f"per prenotazione {decoded_id} a {guest_email}"
+        )
+
+    else:
+        logging.info(
+            f"Prenotazione {decoded_id} archiviata "
+            f"senza email ospite — nessuna email inviata."
+        )
+
+    return {
+        'ok': True,
+        'archived': True,
+        'email_sent': (not is_placeholder and should_send_email)
+    }
 
 @router.post("/admin/bookings/{booking_id}/cancel-refund")
 async def cancel_and_refund(
-    booking_id: str, payload: RefundRequest, admin=Depends(get_current_admin)
+    booking_id: str,
+    payload: RefundRequest,
+    admin=Depends(get_current_admin)
 ):
     decoded_id = urllib.parse.unquote(booking_id)
-    b = await db.bookings.find_one({'id': decoded_id}, {'_id': 0})
+
+    b = await db.bookings.find_one(
+        {'id': decoded_id},
+        {'_id': 0}
+    )
+
     if not b:
         raise HTTPException(404, 'Booking not found')
-    
+
     policy_calc = compute_refund_amount(b)
-    refund_amount = float(payload.amount) if payload.amount is not None else policy_calc['refund']
-    
+
+    refund_amount = (
+        float(payload.amount)
+        if payload.amount is not None
+        else policy_calc['refund']
+    )
+
     if refund_amount > 0:
         tx = await db.payment_transactions.find_one(
-            {'booking_id': decoded_id, 'payment_status': 'paid'}, {'_id': 0}
+            {
+                'booking_id': decoded_id,
+                'payment_status': 'paid'
+            },
+            {'_id': 0}
         )
-        pi = (tx or {}).get('payment_intent_id') or b.get('payment_intent_id')
+
+        pi = (
+            (tx or {}).get('payment_intent_id')
+            or b.get('payment_intent_id')
+        )
+
         if not pi:
-            raise HTTPException(400, 'Payment intent non disponibile')
-            
+            raise HTTPException(
+                400,
+                'Payment intent non disponibile'
+            )
+
         try:
             await asyncio.to_thread(
                 stripe.Refund.create,
@@ -169,35 +254,62 @@ async def cancel_and_refund(
                 amount=int(round(refund_amount * 100)),
                 reason='requested_by_customer',
             )
+
         except Exception as e:
             logging.exception('Stripe refund failed')
-            raise HTTPException(500, f'Rimborso fallito: {e}')
+
+            raise HTTPException(
+                500,
+                f'Rimborso fallito: {e}'
+            )
 
     await db.bookings.update_one(
         {'id': decoded_id},
         {'$set': {
             'status': 'cancelled',
-            'payment_status': 'refunded' if refund_amount > 0 else b.get('payment_status', 'unpaid'),
+            'payment_status': (
+                'refunded'
+                if refund_amount > 0
+                else b.get('payment_status', 'unpaid')
+            ),
             'refund_amount': refund_amount,
             'refund_at': datetime.now(timezone.utc).isoformat(),
         }},
     )
-    return {'ok': True, 'refund_amount': refund_amount}
+
+    return {
+        'ok': True,
+        'refund_amount': refund_amount
+    }
 
 @router.post("/admin/bookings/{booking_id}/balance-reminder")
-async def balance_reminder(booking_id: str, admin=Depends(get_current_admin)):
+async def balance_reminder(
+    booking_id: str,
+    admin=Depends(get_current_admin)
+):
     decoded_id = urllib.parse.unquote(booking_id)
-    b = await db.bookings.find_one({'id': decoded_id}, {'_id': 0})
+
+    b = await db.bookings.find_one(
+        {'id': decoded_id},
+        {'_id': 0}
+    )
+
     if not b:
         raise HTTPException(404, 'Booking not found')
+
     settings = await get_settings()
+
     ok = await send_email_async(
         b['guest_email'],
         f"Promemoria saldo — {settings.get('villa_name','Light Blue')}",
         email_balance_reminder_html(b, settings),
     )
+
     await db.bookings.update_one(
         {'id': decoded_id},
-        {'$set': {'last_reminder_at': datetime.now(timezone.utc).isoformat()}},
+        {'$set': {
+            'last_reminder_at': datetime.now(timezone.utc).isoformat()
+        }},
     )
+
     return {'ok': ok}
