@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from auth import get_current_admin
 from db import db, get_settings, STRIPE_API_KEY
-from email_helpers import send_email_async, email_balance_reminder_html, email_booking_confirmation_html
+from email_helpers import send_email_async, email_balance_reminder_html, email_booking_confirmation_html, email_cancellation_html
 from models import Booking, BookingUpdate, RefundRequest
 from pricing import compute_refund_amount
 
@@ -112,9 +112,41 @@ async def update_booking(
 
 @router.delete("/admin/bookings/{booking_id}")
 async def delete_booking(booking_id: str, admin=Depends(get_current_admin)):
+    """
+    'Elimina' una prenotazione: la archivia (status → cancelled) e invia
+    un'email di cancellazione all'ospite con indicazione del rimborso entro
+    5 giorni lavorativi. La prenotazione NON viene rimossa dal database.
+    """
     decoded_id = urllib.parse.unquote(booking_id)
-    await db.bookings.delete_one({'id': decoded_id})
-    return {'ok': True}
+    b = await db.bookings.find_one({'id': decoded_id}, {'_id': 0})
+    if not b:
+        raise HTTPException(404, 'Booking not found')
+
+    settings = await get_settings()
+
+    # Archivia la prenotazione
+    await db.bookings.update_one(
+        {'id': decoded_id},
+        {'$set': {
+            'status': 'cancelled',
+            'cancelled_at': datetime.now(timezone.utc).isoformat(),
+        }},
+    )
+
+    # Invia email di cancellazione solo se l'ospite ha un'email reale
+    guest_email = b.get('guest_email', '')
+    is_placeholder = not guest_email or guest_email.strip() in ('', 'manual@booking.com')
+    if not is_placeholder:
+        asyncio.create_task(send_email_async(
+            guest_email,
+            f"Prenotazione cancellata — {settings.get('villa_name', 'Light Blue')}",
+            email_cancellation_html(b, settings),
+        ))
+        logging.info(f"Email di cancellazione inviata per prenotazione {decoded_id} a {guest_email}")
+    else:
+        logging.info(f"Prenotazione {decoded_id} archiviata senza email ospite — nessuna email inviata.")
+
+    return {'ok': True, 'archived': True, 'email_sent': not is_placeholder}
 
 @router.post("/admin/bookings/{booking_id}/cancel-refund")
 async def cancel_and_refund(
