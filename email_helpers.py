@@ -30,8 +30,8 @@ def _cancellation_policy_info(booking: dict, settings: dict) -> dict:
 
     Regole (allineate a compute_refund_amount in pricing.py):
       - flexible : rimborso 100% fino a 24h prima del check-in
-      - moderate : rimborso 100% fino a 5 giorni prima del check-in;
-                   50% da 1 a 5 giorni; 0% nelle ultime 24h
+      - moderate : rimborso 100% fino a 7 giorni prima del check-in;
+                   50% da 1 a 7 giorni; 0% nelle ultime 24h
       - strict   : rimborso 100% entro 48h dalla prenotazione E
                    almeno 14 giorni prima del check-in;
                    50% fino a 7 giorni prima; 0% oltre
@@ -64,11 +64,11 @@ def _cancellation_policy_info(booking: dict, settings: dict) -> dict:
 
     elif policy == 'moderate':
         description = (
-            'Rimborso completo (100%) se disdici almeno 5 giorni prima del check-in. '
-            'Rimborso del 50% da 1 a 5 giorni prima. '
+            'Rimborso completo (100%) se disdici almeno 7 giorni prima del check-in. '
+            'Rimborso del 50% da 1 a 7 giorni prima. '
             'Nessun rimborso nelle ultime 24 ore.'
         )
-        deadline_dt = check_in_dt - timedelta(days=5) if check_in_dt else None
+        deadline_dt = check_in_dt - timedelta(days=7) if check_in_dt else None
         deadline_label = 'Disdetta gratuita entro'
 
     else:  # strict
@@ -197,7 +197,8 @@ def email_cancellation_html(booking: dict, settings: dict) -> str:
         {refund_row}
       </table>
       <p style="color:#5C6A79;font-size:14px">
-        Per qualsiasi domanda o chiarimento non esitare a contattarci.
+        Per qualsiasi domanda o chiarimento non esitare a contattarci rispondendo a questa email
+        o al numero indicato sul sito.
       </p>
       <p>A presto,<br/>{villa}</p>
       <p style="color:#5C6A79;font-size:12px;margin-top:32px">{settings.get('villa_address','')}<br/>CIR {settings.get('villa_cir','')}</p>
