@@ -197,8 +197,7 @@ def email_cancellation_html(booking: dict, settings: dict) -> str:
         {refund_row}
       </table>
       <p style="color:#5C6A79;font-size:14px">
-        Per qualsiasi domanda o chiarimento non esitare a contattarci rispondendo a questa email
-        o al numero indicato sul sito.
+        Per qualsiasi domanda o chiarimento non esitare a contattarci.
       </p>
       <p>A presto,<br/>{villa}</p>
       <p style="color:#5C6A79;font-size:12px;margin-top:32px">{settings.get('villa_address','')}<br/>CIR {settings.get('villa_cir','')}</p>
