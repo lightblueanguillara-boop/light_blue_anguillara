@@ -84,7 +84,7 @@ async def dates_available(check_in: str, check_out: str, exclude_id: Optional[st
 def compute_refund_amount(booking: dict) -> dict:
     """Airbnb-style policy:
     - flexible: 100% fino a 24h prima del check-in; 0% oltre
-    - moderate: 100% fino a 5 giorni prima del check-in; 50% fino a 24h; 0% oltre
+    - moderate: 100% fino a 7 giorni prima del check-in; 50% fino a 24h; 0% oltre
     - strict:   100% entro 48h dalla prenotazione E >=14gg prima del check-in;
                 50% fino a 7gg prima; 0% oltre
     """
@@ -108,10 +108,10 @@ def compute_refund_amount(booking: dict) -> dict:
         else:
             pct, reason = 0, 'Flessibile: <24h dal check-in'
     elif policy == 'moderate':
-        if hours_to_checkin >= 24 * 5:
-            pct, reason = 100, 'Moderata: >5 giorni dal check-in'
+        if hours_to_checkin >= 24 * 7:
+            pct, reason = 100, 'Moderata: >7 giorni dal check-in'
         elif hours_to_checkin >= 24:
-            pct, reason = 50, 'Moderata: 1-5 giorni dal check-in'
+            pct, reason = 50, 'Moderata: 1-7 giorni dal check-in'
         else:
             pct, reason = 0, 'Moderata: <24h dal check-in'
     else:  # strict
