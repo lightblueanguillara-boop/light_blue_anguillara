@@ -15,7 +15,7 @@ from models import SettingsUpdate, GalleryImage, GalleryImageUpdate
 
 router = APIRouter()
 
-# Configurazione Cloudinary (Recuperata da variabili d'ambiente)
+# Configurazione Cloudinary
 cloudinary.config(
     cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
     api_key=os.getenv("CLOUDINARY_API_KEY"),
@@ -25,14 +25,15 @@ cloudinary.config(
 
 @router.get("/admin/analytics")
 async def analytics(admin=Depends(get_current_admin)):
-    # Recupero TUTTE le prenotazioni
+    # Recupero tutte le prenotazioni
     bookings = await db.bookings.find({}, {'_id': 0}).to_list(10000)
+
     now = datetime.now(timezone.utc).date()
 
     months = []
     month_map = {}
 
-    # Generazione dei 12 mesi
+    # Generazione ultimi 12 mesi
     base_date = now.replace(day=1)
 
     for i in range(11, -1, -1):
@@ -51,88 +52,126 @@ async def analytics(admin=Depends(get_current_admin)):
         })
 
     total_revenue_accumulated = 0.0
+    total_nights_accumulated = 0
 
-    # SOLO prenotazioni confermate e completamente pagate
-    valid_bookings = []
+    # Booking confermate
+    confirmed_bookings = [
+        b for b in bookings
+        if b.get('status') == 'confirmed'
+    ]
 
-    for b in bookings:
-        status = b.get('status')
-        payment_status = b.get('payment_status')
+    # Booking confermate E pagate
+    paid_confirmed_bookings = [
+        b for b in bookings
+        if (
+            b.get('status') == 'confirmed'
+            and b.get('payment_status') == 'fully_paid'
+        )
+    ]
 
-        if status != 'confirmed':
-            continue
+    # Booking esterne
+    external_bookings = [
+        b for b in bookings
+        if b.get('status') == 'external'
+    ]
 
-        if payment_status != 'fully_paid':
-            continue
+    # --------------------------------------------------
+    # GUADAGNI → SOLO confermate e pagate
+    # --------------------------------------------------
 
-        valid_bookings.append(b)
-
-    # Elaborazione dati analytics
-    for b in valid_bookings:
+    for b in paid_confirmed_bookings:
         try:
-            # Prezzo totale
             price_val = float(b.get('total_price', 0))
+
             total_revenue_accumulated += price_val
 
-            # Parsing sicuro date
             raw_in = b.get('check_in')
 
             if not raw_in:
                 continue
 
             date_str_in = str(raw_in)[:10]
-            dt_in = datetime.strptime(date_str_in, '%Y-%m-%d').date()
 
-            # Mappa mese
+            dt_in = datetime.strptime(
+                date_str_in,
+                '%Y-%m-%d'
+            ).date()
+
             key = f"{dt_in.year}-{dt_in.month}"
 
             if key in month_map:
                 idx = month_map[key]
 
-                # Revenue mensile
                 months[idx]['revenue'] = round(
                     months[idx]['revenue'] + price_val,
                     2
                 )
 
-                # Notti prenotate
-                raw_out = b.get('check_out')
+        except Exception as e:
+            logging.error(f"Errore revenue booking: {e}")
+            continue
 
-                if raw_out:
-                    date_str_out = str(raw_out)[:10]
-                    dt_out = datetime.strptime(
-                        date_str_out,
-                        '%Y-%m-%d'
-                    ).date()
+    # --------------------------------------------------
+    # NOTTI → confermate pagate + esterne
+    # --------------------------------------------------
 
-                    diff = (dt_out - dt_in).days
+    nights_bookings = paid_confirmed_bookings + external_bookings
 
-                    months[idx]['nights'] += max(0, diff)
+    for b in nights_bookings:
+        try:
+            raw_in = b.get('check_in')
+            raw_out = b.get('check_out')
+
+            if not raw_in or not raw_out:
+                continue
+
+            date_str_in = str(raw_in)[:10]
+            date_str_out = str(raw_out)[:10]
+
+            dt_in = datetime.strptime(
+                date_str_in,
+                '%Y-%m-%d'
+            ).date()
+
+            dt_out = datetime.strptime(
+                date_str_out,
+                '%Y-%m-%d'
+            ).date()
+
+            diff = max(0, (dt_out - dt_in).days)
+
+            total_nights_accumulated += diff
+
+            key = f"{dt_in.year}-{dt_in.month}"
+
+            if key in month_map:
+                idx = month_map[key]
+
+                months[idx]['nights'] += diff
 
         except Exception as e:
-            logging.error(f"Errore calcolo booking: {e}")
+            logging.error(f"Errore nights booking: {e}")
             continue
 
     return {
         'monthly': months,
+
         'totals': {
+            # SOLO confermate e pagate
             'revenue': round(total_revenue_accumulated, 2),
 
-            'nights': sum(
-                m['nights'] for m in months
-            ),
+            # Confermate pagate + esterne
+            'nights': total_nights_accumulated,
 
-            'confirmed_bookings': len(valid_bookings),
+            # TUTTE le confermate
+            'confirmed_bookings': len(confirmed_bookings),
 
             'pending_bookings': sum(
                 1 for b in bookings
                 if b.get('status') == 'pending'
             ),
 
-            'external_bookings': sum(
-                1 for b in bookings
-                if b.get('status') == 'external'
-            ),
+            'external_bookings': len(external_bookings),
 
             'new_messages': await db.contact_messages.count_documents({
                 'status': 'new'
