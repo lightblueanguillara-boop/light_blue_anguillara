@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from auth import get_current_admin
 from db import db, get_settings, STRIPE_API_KEY
-from email_helpers import send_email_async, email_balance_reminder_html
+from email_helpers import send_email_async, email_balance_reminder_html, email_booking_confirmation_html
 from models import Booking, BookingUpdate, RefundRequest
 from pricing import compute_refund_amount
 
@@ -24,16 +24,25 @@ async def list_bookings(admin=Depends(get_current_admin)):
 
 @router.post("/admin/bookings/manual")
 async def create_manual_booking(payload: dict, admin=Depends(get_current_admin)):
-    """Crea una prenotazione manuale gestendo i campi obbligatori del modello Booking."""
+    """Crea una prenotazione manuale e invia email di conferma all'ospite."""
     try:
         total_price = float(payload.get('total_price', 0))
         deposit_amount = float(payload.get('deposit_amount', 0))
         
         guest_email = payload.get('guest_email')
-        if not guest_email or guest_email.strip() == "":
+        placeholder_email = not guest_email or guest_email.strip() == ""
+        if placeholder_email:
             guest_email = "manual@booking.com"
 
-        # Costruiamo il dizionario
+        settings = await get_settings()
+
+        # Legge la cancellation_policy dal payload (scelta dall'admin nella form),
+        # con fallback alle impostazioni globali della villa.
+        cancellation_policy = (
+            payload.get('cancellation_policy')
+            or settings.get('default_cancellation_policy', 'moderate')
+        )
+
         booking_data = {
             "id": payload.get('id') or str(uuid.uuid4()),
             "guest_name": payload.get('guest_name', 'Ospite Manuale'),
@@ -46,7 +55,7 @@ async def create_manual_booking(payload: dict, admin=Depends(get_current_admin))
             "total_price": total_price,
             "deposit_amount": deposit_amount,
             "payment_choice": payload.get('payment_choice', 'full'),
-            "cancellation_policy": payload.get('cancellation_policy', 'moderate'),
+            "cancellation_policy": cancellation_policy,
             "status": 'confirmed',
             "payment_status": payload.get('payment_status', 'unpaid'),
             "source": 'manual',
@@ -58,18 +67,30 @@ async def create_manual_booking(payload: dict, admin=Depends(get_current_admin))
         if not booking_data['check_in'] or not booking_data['check_out']:
             raise HTTPException(400, "Date check-in e check-out mancanti")
 
-        # Inserimento nel DB
         await db.bookings.insert_one(booking_data)
-        
-        # RIMUOVIAMO l'id interno di MongoDB (_id) per evitare l'errore ObjectId
+
         if "_id" in booking_data:
             del booking_data["_id"]
-        
+
+        # Invia email di conferma solo se l'email è reale (non il placeholder)
+        if not placeholder_email:
+            asyncio.create_task(send_email_async(
+                guest_email,
+                f"Prenotazione confermata — {settings.get('villa_name', 'Light Blue')}",
+                email_booking_confirmation_html(booking_data, settings),
+            ))
+            logging.info(f"Email di conferma inviata per prenotazione manuale {booking_data['id']} a {guest_email}")
+        else:
+            logging.info(f"Prenotazione manuale {booking_data['id']} creata senza email ospite — nessuna conferma inviata.")
+
         return {
             "ok": True,
             "message": "Prenotazione creata con successo",
-            "booking": booking_data
+            "booking": booking_data,
+            "email_sent": not placeholder_email,
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logging.error(f"Errore creazione manuale: {e}")
         raise HTTPException(500, f"Errore durante il salvataggio: {str(e)}")
