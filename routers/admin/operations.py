@@ -1,6 +1,8 @@
 """Operations: analytics, settings, iCal sync, and Image management."""
 import os
 import logging
+import uuid
+import urllib.parse
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 
@@ -15,7 +17,7 @@ from models import SettingsUpdate, GalleryImage, GalleryImageUpdate
 
 router = APIRouter()
 
-# Configurazione Cloudinary (Recuperata da variabili d'ambiente)
+# Configurazione Cloudinary
 cloudinary.config(
     cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
     api_key=os.getenv("CLOUDINARY_API_KEY"),
@@ -25,23 +27,20 @@ cloudinary.config(
 
 @router.get("/admin/analytics")
 async def analytics(admin=Depends(get_current_admin)):
-    # MODIFICA: Filtriamo le prenotazioni per includere solo quelle confermate o esterne.
-    # Questo esclude le 'pending' (non pagate) e le 'cancelled'.
+    # Filtriamo solo le prenotazioni confermate o esterne (escludiamo i tentativi di pagamento falliti)
     query = {"status": {"$in": ["confirmed", "external"]}}
     bookings = await db.bookings.find(query, {'_id': 0}).to_list(10000)
     
     now = datetime.now(timezone.utc).date()
-    
     months = []
     month_map = {}
     
-    # 2. Generazione dei 12 mesi (stabile e indipendente dal server)
+    # Generazione dei 12 mesi per il grafico
     base_date = now.replace(day=1)
     for i in range(11, -1, -1):
-        # Calcolo mese per mese andando a ritroso
         target_date = (base_date - timedelta(days=i*31)).replace(day=1)
         m_key = target_date.strftime('%Y-%m')
-        m_label = target_date.strftime('%b') # Esempio: Jan, Feb...
+        m_label = target_date.strftime('%b')
         
         entry = {"name": m_label, "guadagni": 0, "notti": 0}
         months.append(entry)
@@ -50,25 +49,27 @@ async def analytics(admin=Depends(get_current_admin)):
     total_revenue = 0
     total_nights = 0
 
-    # 3. Aggregazione dati
     for b in bookings:
         try:
-            # Calcolo notti e ricavo totale
-            check_in = datetime.strptime(b['check_in'], '%Y-%m-%d').date()
-            check_out = datetime.strptime(b['check_out'], '%Y-%m-%d').date()
+            check_in_str = b.get('check_in')
+            check_out_str = b.get('check_out')
+            if not check_in_str or not check_out_str:
+                continue
+
+            check_in = datetime.strptime(check_in_str, '%Y-%m-%d').date()
+            check_out = datetime.strptime(check_out_str, '%Y-%m-%d').date()
             notti = (check_out - check_in).days
             prezzo = float(b.get('total_price', 0))
 
             total_revenue += prezzo
             total_nights += notti
 
-            # Distribuzione nei grafici mensili (basata sul check-in)
             m_key = check_in.strftime('%Y-%m')
             if m_key in month_map:
                 month_map[m_key]["guadagni"] += prezzo
                 month_map[m_key]["notti"] += notti
         except Exception as e:
-            logging.error(f"Errore processamento analytics per booking {b.get('id')}: {e}")
+            logging.error(f"Errore analytics per booking {b.get('id')}: {e}")
             continue
 
     return {
@@ -102,12 +103,12 @@ async def get_gallery():
 @router.post("/admin/gallery", response_model=GalleryImage)
 async def upload_gallery_image(
     file: UploadFile = File(...),
-    caption: str = Form(\"\"),
-    category: str = Form(\"general\"),
+    caption: str = Form(""),
+    category: str = Form("general"),
     admin=Depends(get_current_admin)
 ):
     try:
-        upload_result = cloudinary.uploader.upload(file.file, folder=\"light_blue_gallery\")
+        upload_result = cloudinary.uploader.upload(file.file, folder="light_blue_gallery")
         new_image = GalleryImage(
             url=upload_result['secure_url'],
             public_id=upload_result['public_id'],
@@ -120,23 +121,27 @@ async def upload_gallery_image(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.patch(\"/admin/gallery/{image_id}\", response_model=GalleryImage)
+@router.patch("/admin/gallery/{image_id}", response_model=GalleryImage)
 async def update_image_info(image_id: str, updates: GalleryImageUpdate, admin=Depends(get_current_admin)):
+    decoded_id = urllib.parse.unquote(image_id)
     patch = updates.model_dump(exclude_unset=True)
     result = await db.gallery.find_one_and_update(
-        {\"id\": image_id}, {\"$set\": patch},
+        {"id": decoded_id}, {"$set": patch},
         projection={'_id': 0}, return_document=True
     )
-    if not result: raise HTTPException(404, \"Immagine non trovata\")
+    if not result: 
+        raise HTTPException(404, "Immagine non trovata")
     return result
 
-@router.delete(\"/admin/gallery/{image_id}\")
+@router.delete("/admin/gallery/{image_id}")
 async def delete_gallery_image(image_id: str, admin=Depends(get_current_admin)):
-    image = await db.gallery.find_one({\"id\": image_id})
-    if not image: raise HTTPException(404, \"Immagine non trovata\")
+    decoded_id = urllib.parse.unquote(image_id)
+    image = await db.gallery.find_one({"id": decoded_id})
+    if not image: 
+        raise HTTPException(404, "Immagine non trovata")
     try:
         cloudinary.uploader.destroy(image['public_id'])
-        await db.gallery.delete_one({\"id\": image_id})
-        return {\"ok\": True}
+        await db.gallery.delete_one({"id": decoded_id})
+        return {"ok": True}
     except Exception as e:
         raise HTTPException(500, str(e))
