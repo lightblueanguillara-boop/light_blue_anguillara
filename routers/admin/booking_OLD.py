@@ -29,6 +29,10 @@ async def create_manual_booking(payload: dict, admin=Depends(get_current_admin))
         total_price = float(payload.get('total_price', 0))
         deposit_amount = float(payload.get('deposit_amount', 0))
         
+        # Estrazione corretta degli ospiti dal payload inviato dal front-end
+        adults = int(payload.get('adults', 2))
+        children = int(payload.get('children', 0))
+        
         guest_email = payload.get('guest_email')
         placeholder_email = not guest_email or guest_email.strip() == ""
         if placeholder_email:
@@ -36,8 +40,6 @@ async def create_manual_booking(payload: dict, admin=Depends(get_current_admin))
 
         settings = await get_settings()
 
-        # Legge la cancellation_policy dal payload (scelta dall'admin nella form),
-        # con fallback alle impostazioni globali della villa.
         cancellation_policy = (
             payload.get('cancellation_policy')
             or settings.get('default_cancellation_policy', 'moderate')
@@ -50,8 +52,8 @@ async def create_manual_booking(payload: dict, admin=Depends(get_current_admin))
             "guest_phone": payload.get('guest_phone', ''),
             "check_in": payload.get('check_in'),
             "check_out": payload.get('check_out'),
-            "adults": int(payload.get('adults', 2)),
-            "children": int(payload.get('children', 0)),
+            "adults": adults,
+            "children": children,
             "total_price": total_price,
             "deposit_amount": deposit_amount,
             "payment_choice": payload.get('payment_choice', 'full'),
@@ -72,7 +74,6 @@ async def create_manual_booking(payload: dict, admin=Depends(get_current_admin))
         if "_id" in booking_data:
             del booking_data["_id"]
 
-        # Invia email di conferma solo se l'email è reale (non il placeholder)
         if not placeholder_email:
             asyncio.create_task(send_email_async(
                 guest_email,
@@ -112,11 +113,6 @@ async def update_booking(
 
 @router.delete("/admin/bookings/{booking_id}")
 async def delete_booking(booking_id: str, admin=Depends(get_current_admin)):
-    """
-    'Elimina' una prenotazione: la archivia (status → cancelled) e invia
-    un'email di cancellazione all'ospite con indicazione del rimborso entro
-    5 giorni lavorativi. La prenotazione NON viene rimossa dal database.
-    """
     decoded_id = urllib.parse.unquote(booking_id)
     b = await db.bookings.find_one({'id': decoded_id}, {'_id': 0})
     if not b:
@@ -124,7 +120,6 @@ async def delete_booking(booking_id: str, admin=Depends(get_current_admin)):
 
     settings = await get_settings()
 
-    # Archivia la prenotazione
     await db.bookings.update_one(
         {'id': decoded_id},
         {'$set': {
@@ -133,7 +128,6 @@ async def delete_booking(booking_id: str, admin=Depends(get_current_admin)):
         }},
     )
 
-    # Invia email di cancellazione solo se l'ospite ha un'email reale
     guest_email = b.get('guest_email', '')
     is_placeholder = not guest_email or guest_email.strip() in ('', 'manual@booking.com')
     if not is_placeholder:
