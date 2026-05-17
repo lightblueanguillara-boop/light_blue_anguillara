@@ -75,6 +75,7 @@ class ContactMessage(BaseModel):
     consent_newsletter: bool = False
     status: Literal['new', 'read', 'replied'] = 'new'
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    replies: List[dict] = Field(default_factory=list)
 
 class ContactCreate(BaseModel):
     name: str
