@@ -52,13 +52,23 @@ async def reply_message(
         "sender": "admin"
     }
 
-    # Aggiorna il messaggio aggiungendo la risposta all'array 'replies'
+    # Aggiorna il messaggio aggiungendo la risposta nella chat e modificando lo stato in risposto
     await db.contact_messages.update_one(
-        {'id': msg_id}, 
+        {'id': msg_id},
         {
-            '$set': {'status': 'replied'},
-            '$push': {'replies': new_reply}
+            '$push': {'chat': new_reply},
+            '$set': {'status': 'replied', 'updated_at': datetime.now(timezone.utc).isoformat()}
         }
     )
-    
+
     return await db.contact_messages.find_one({'id': msg_id}, {'_id': 0})
+
+@router.delete("/admin/messages/{msg_id}")
+async def delete_message(msg_id: str, admin=Depends(get_current_admin)):
+    """Elimina definitivamente una chat/messaggio dal database."""
+    msg = await db.contact_messages.find_one({'id': msg_id})
+    if not msg:
+        raise HTTPException(404, 'Messaggio non trovato')
+    
+    await db.contact_messages.delete_one({'id': msg_id})
+    return {'ok': True, 'detail': 'Messaggio eliminato con successo'}
