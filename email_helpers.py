@@ -22,6 +22,19 @@ def _cancellation_policy_info(booking: dict, settings: dict) -> dict:
     """
     Restituisce il testo descrittivo della politica di cancellazione
     e la data ultima entro cui è possibile disdire con rimborso completo.
+
+    La politica viene letta in questo ordine:
+      1. booking['cancellation_policy'] (salvato al momento della prenotazione)
+      2. settings['default_cancellation_policy'] (fallback dalle impostazioni)
+      3. 'moderate' (default assoluto)
+
+    Regole (allineate a compute_refund_amount in pricing.py):
+      - flexible : rimborso 100% fino a 24h prima del check-in
+      - moderate : rimborso 100% fino a 7 giorni prima del check-in;
+                   50% da 1 a 7 giorni; 0% nelle ultime 24h
+      - strict   : rimborso 100% entro 48h dalla prenotazione E
+                   almeno 14 giorni prima del check-in;
+                   50% fino a 7 giorni prima; 0% oltre
     """
     policy = (
         booking.get('cancellation_policy')
@@ -65,6 +78,7 @@ def _cancellation_policy_info(booking: dict, settings: dict) -> dict:
             'Rimborso del 50% fino a 7 giorni prima del check-in. '
             'Nessun rimborso oltre.'
         )
+        # Per la "strict" il termine più favorevole al cliente è 14gg prima del check-in
         deadline_dt = check_in_dt - timedelta(days=14) if check_in_dt else None
         deadline_label = 'Disdetta gratuita entro'
 
@@ -101,6 +115,7 @@ def email_booking_confirmation_html(booking: dict, settings: dict) -> str:
     if balance > 0:
         balance_row = f"<tr><td style='padding:8px 0;color:#5C6A79'>Saldo da versare</td><td style='padding:8px 0;text-align:right'>€{balance}</td></tr>"
 
+    # Recupera testo politica e data limite calcolata dinamicamente
     pol = _cancellation_policy_info(booking, settings)
 
     cancellation_block = f"""
@@ -133,6 +148,48 @@ def email_booking_confirmation_html(booking: dict, settings: dict) -> str:
     """
 
 
+def email_modification_confirmation_html(booking: dict, settings: dict) -> str:
+    """Email di modifica prenotazione — stessa grafica esatta della conferma."""
+    villa = settings.get('villa_name', 'Light Blue')
+    choice = booking.get('payment_choice')
+    paid = booking.get('total_price') if choice == 'full' else booking.get('deposit_amount')
+    balance = 0 if choice == 'full' else round(booking.get('total_price', 0) - booking.get('deposit_amount', 0), 2)
+    balance_row = ''
+    if balance > 0:
+        balance_row = f"<tr><td style='padding:8px 0;color:#5C6A79'>Saldo da versare</td><td style='padding:8px 0;text-align:right'>€{balance}</td></tr>"
+
+    pol = _cancellation_policy_info(booking, settings)
+
+    cancellation_block = f"""
+      <tr style="border-top:1px solid #E5E0D8">
+        <td colspan="2" style="padding:16px 0 4px 0">
+          <strong style="color:#2A333C">Politica di cancellazione: {pol['label']}</strong><br/>
+          <span style="color:#5C6A79;font-size:13px">{pol['description']}</span>
+          {"<br/><span style='color:#7A93AC;font-size:13px;margin-top:4px;display:inline-block'>" + pol['deadline_text'] + "</span>" if pol['deadline_text'] else ""}
+        </td>
+      </tr>
+    """
+
+    return f"""
+    <div style="font-family:Manrope,Arial,sans-serif;max-width:560px;margin:0 auto;padding:32px;background:#FAF9F6;color:#2A333C">
+      <h1 style="font-family:'Outfit',sans-serif;font-weight:300;font-size:28px;letter-spacing:-0.5px">Prenotazione modificata</h1>
+      <p>Ciao {booking.get('guest_name')},</p>
+      <p>ti confermiamo che i dettagli della tua prenotazione presso <strong>{villa}</strong> sono stati aggiornati.</p>
+      <table style="width:100%;border-collapse:collapse;margin:24px 0">
+        <tr><td style="padding:8px 0;color:#5C6A79">Check-in</td><td style="padding:8px 0;text-align:right"><strong>{_it_date(booking.get('check_in'))}</strong></td></tr>
+        <tr><td style="padding:8px 0;color:#5C6A79">Check-out</td><td style="padding:8px 0;text-align:right"><strong>{_it_date(booking.get('check_out'))}</strong></td></tr>
+        <tr><td style="padding:8px 0;color:#5C6A79">Ospiti</td><td style="padding:8px 0;text-align:right">{booking.get('adults')} adulti, {booking.get('children')} bambini</td></tr>
+        <tr><td style="padding:8px 0;color:#5C6A79">Totale soggiorno</td><td style="padding:8px 0;text-align:right">€{booking.get('total_price')}</td></tr>
+        <tr style="border-top:1px solid #E5E0D8"><td style="padding:12px 0;color:#5C6A79">Pagato</td><td style="padding:12px 0;text-align:right;color:#7A93AC"><strong>€{paid}</strong></td></tr>
+        {balance_row}
+        {cancellation_block}
+      </table>
+      <p>A presto,<br/>{villa}</p>
+      <p style="color:#5C6A79;font-size:12px;margin-top:32px">{settings.get('villa_address','')}<br/>CIR {settings.get('villa_cir','')}</p>
+    </div>
+    """
+
+
 def email_balance_reminder_html(booking: dict, settings: dict) -> str:
     villa = settings.get('villa_name', 'Light Blue')
     balance = round(booking.get('total_price', 0) - booking.get('deposit_amount', 0), 2)
@@ -148,6 +205,7 @@ def email_balance_reminder_html(booking: dict, settings: dict) -> str:
 
 
 def email_cancellation_html(booking: dict, settings: dict) -> str:
+    """Email di cancellazione prenotazione — stessa grafica della conferma."""
     villa = settings.get('villa_name', 'Light Blue')
     total_paid = 0.0
     if booking.get('payment_status') == 'deposit_paid':
@@ -190,6 +248,7 @@ def email_cancellation_html(booking: dict, settings: dict) -> str:
 
 
 def email_guest_contact_confirmation_html(msg: dict) -> str:
+    """Email di conferma ricezione contatto inviata automaticamente all'ospite."""
     name = msg.get('name', '').split()[0] if msg.get('name') else 'Ospite'
     return f"""<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
 <html dir="ltr" lang="it">
@@ -224,7 +283,7 @@ def email_guest_contact_confirmation_html(msg: dict) -> str:
                             <p style="margin:0;padding:0">
                               Gentile {name},<br /><br />
                               abbiamo ricevuto la tua richiesta e ti ringraziamo per averci contattato.<br /><br />
-                              Il nostro team la esaminerà e ti risponeremo al più presto.<br /><br />
+                              Il nostro team la esaminerà e ti risponderemo al più presto.<br /><br />
                               <em style="color:#5C6A79;font-size:15px">Per favore non rispondere a questa email — la casella non è monitorata. Per urgenze puoi contattarci direttamente tramite il sito.</em>
                             </p>
                           </td>
@@ -268,128 +327,3 @@ def email_admin_contact_notification_html(msg: dict) -> str:
       <blockquote style="border-left:3px solid #7A93AC;padding-left:12px;color:#5C6A79">{msg.get('message')}</blockquote>
     </div>
     """
-
-
-def email_booking_update_html(booking: dict, settings: dict) -> str:
-    """Email di notifica modifica prenotazione — Generata con il layout 'Elite' richiesto."""
-    villa = settings.get('villa_name', 'Light Blue')
-    name = booking.get('guest_name', 'Ospite')
-    check_in_str = _it_date(booking.get('check_in'))
-    check_out_str = _it_date(booking.get('check_out'))
-    adults = booking.get('adults', 2)
-    children = booking.get('children', 0)
-    total_price = booking.get('total_price', 0)
-
-    return f"""<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
-<html dir="ltr" lang="it">
-  <head>
-    <meta content="width=device-width" name="viewport" />
-    <meta content="text/html; charset=UTF-8" http-equiv="Content-Type" />
-    <title>{villa}</title>
-  </head>
-  <body style="margin:0;padding:0;background-color:#f4f7f9;font-family:Georgia, 'Times New Roman', serif;">
-    <table border="0" width="100%" cellpadding="0" cellspacing="0" role="presentation" style="background-color:#f4f7f9;">
-      <tbody>
-        <tr>
-          <td align="center" style="padding:40px 16px;">
-            <table align="center" width="100%" border="0" cellpadding="0" cellspacing="0" role="presentation"
-              style="max-width:580px;width:100%;background-color:#ffffff;border-radius:2px;overflow:hidden;box-shadow:0 2px 24px rgba(7,68,90,0.07);">
-              <tbody>
-                <tr>
-                  <td align="center" style="padding:52px 40px 36px 40px;background-color:#ffffff;">
-                    <table border="0" cellpadding="0" cellspacing="0" role="presentation" width="100%">
-                      <tr>
-                        <td align="center" style="padding-bottom:14px;">
-                          <img alt="{villa} Logo" src="https://www.lightblueanguillara.com/favicon.ico" width="72" style="display:block;border:0;" />
-                        </td>
-                      </tr>
-                      <tr>
-                        <td align="center">
-                          <h1 style="margin:0;font-family:Helvetica,Arial,sans-serif;font-size:20px;font-weight:normal;color:#1a4a5e;letter-spacing:6px;text-transform:uppercase;">{villa.upper()}</h1>
-                          <p style="margin:6px 0 0 0;font-size:12px;font-style:italic;color:#19a7d7;letter-spacing:1px;font-family:Georgia,'Times New Roman',serif;">{settings.get('villa_lake', 'Lago di Bracciano')}</p>
-                        </td>
-                      </tr>
-                    </table>
-                  </td>
-                </tr>
-                <tr>
-                  <td style="padding:0 48px;">
-                    <div style="height:1px;background-color:#e0eaee;"></div>
-                  </td>
-                </tr>
-                <tr>
-                  <td style="padding:48px 48px 36px 48px;">
-                    <p style="margin:0 0 8px 0;font-size:13px;letter-spacing:3px;text-transform:uppercase;color:#19a7d7;font-family:Helvetica,Arial,sans-serif;font-weight:normal;">
-                      Gentile {name},
-                    </p>
-                    <h2 style="margin:0 0 28px 0;font-family:Georgia,'Times New Roman',serif;font-size:26px;font-weight:normal;color:#07445a;line-height:1.3;letter-spacing:-0.3px;">
-                      La tua prenotazione è stata modificata
-                    </h2>
-                    <div style="font-size:16px;line-height:1.85;color:#3a4a54;font-family:Georgia,'Times New Roman',serif;">
-                      <p style="margin:0 0 20px 0;">
-                        Ti confermiamo che i dettagli del tuo soggiorno presso <strong>{villa}</strong> sono stati aggiornati correttamente dall'amministratore.
-                      </p>
-                      <p style="margin:0 0 20px 0;">
-                        Di seguito trovi il riepilogo con le nuove informazioni sulla tua prenotazione:
-                      </p>
-                      <table border="0" cellpadding="0" cellspacing="0" role="presentation" width="100%"
-                        style="margin:28px 0;border-left:3px solid #19a7d7;background-color:#f0f8fc;">
-                        <tr>
-                          <td style="padding:18px 20px;font-size:15px;color:#07445a;font-family:Georgia,'Times New Roman',serif;line-height:1.7;">
-                            <strong style="display:block;margin-bottom:6px;font-size:12px;letter-spacing:2px;text-transform:uppercase;color:#19a7d7;font-family:Helvetica,Arial,sans-serif;">Dettagli Aggiornati</strong>
-                            Check-in: <strong>{check_in_str}</strong><br/>
-                            Check-out: <strong>{check_out_str}</strong><br/>
-                            Ospiti: <strong>{adults} adulti{f', {children} bambini' if children > 0 else ''}</strong><br/>
-                            Totale soggiorno: <strong>€{total_price}</strong>
-                          </td>
-                        </tr>
-                      </table>
-                      <p style="margin:0 0 6px 0;">
-                        A presto,
-                      </p>
-                      <p style="margin:0;color:#07445a;font-style:italic;">
-                        Il team di {villa}
-                      </p>
-                    </div>
-                  </td>
-                </tr>
-                <tr>
-                  <td align="center" style="padding:0 48px 48px 48px;">
-                    <table border="0" cellpadding="0" cellspacing="0" role="presentation">
-                      <tr>
-                        <td align="center" style="background-color:#07445a;border-radius:2px;">
-                          <a href="https://www.lightblueanguillara.com"
-                            style="color:#ffffff;text-decoration:none;display:inline-block;padding:18px 42px;font-family:Helvetica,Arial,sans-serif;font-size:12px;font-weight:bold;letter-spacing:3px;text-transform:uppercase;"
-                            target="_blank">
-                            Vai al sito
-                          </a>
-                        </td>
-                      </tr>
-                    </table>
-                  </td>
-                </tr>
-                <tr>
-                  <td style="height:1px;background-color:#e8eef2;"></td>
-                </tr>
-                <tr>
-                  <td align="center" style="padding:28px 40px 32px 40px;background-color:#f9fbfc;">
-                    <p style="margin:0 0 8px 0;font-size:11px;color:#07445a;letter-spacing:3px;text-transform:uppercase;font-family:Helvetica,Arial,sans-serif;">
-                      {villa} &nbsp;·&nbsp; Anguillara Sabazia
-                    </p>
-                    <p style="margin:0 0 14px 0;font-size:11px;color:#8aa0aa;letter-spacing:0.5px;font-family:Helvetica,Arial,sans-serif;line-height:1.6;">
-                      {settings.get('villa_address', '')}<br/>
-                      <a href="mailto:{settings.get('villa_email', 'info@lightblueanguillara.com')}" style="color:#19a7d7;text-decoration:none;">{settings.get('villa_email', '')}</a>
-                    </p>
-                    <p style="margin:0;font-size:10px;color:#b0bec5;letter-spacing:0.5px;font-family:Helvetica,Arial,sans-serif;">
-                      Questa email è stata inviata automaticamente a seguito di una modifica della sua prenotazione.
-                    </p>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </td>
-        </tr>
-      </tbody>
-    </table>
-  </body>
-</html>"""
