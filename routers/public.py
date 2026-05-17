@@ -8,7 +8,7 @@ from icalendar import Calendar, Event
 from pydantic import EmailStr
 
 from db import db, get_settings, ADMIN_NOTIFY_EMAIL
-from email_helpers import send_email_async, email_admin_contact_notification_html
+from email_helpers import send_email_async, email_admin_contact_notification_html, email_guest_contact_confirmation_html
 from models import ContactMessage, ContactCreate, Subscriber, GalleryImage # Aggiunto GalleryImage
 from pricing import compute_stay_pricing, dates_available, daterange
 
@@ -82,6 +82,12 @@ async def contact(payload: ContactCreate):
             f"[Light Blue] Nuova richiesta da {payload.name}",
             email_admin_contact_notification_html(msg.model_dump()),
         ))
+    # Conferma automatica all'ospite
+    asyncio.create_task(send_email_async(
+        payload.email,
+        "Abbiamo ricevuto la tua richiesta — Light Blue Anguillara",
+        email_guest_contact_confirmation_html(msg.model_dump()),
+    ))
     return {'ok': True, 'id': msg.id}
 
 
