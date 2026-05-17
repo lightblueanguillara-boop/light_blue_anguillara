@@ -11,8 +11,15 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from auth import get_current_admin
 from db import db, get_settings, STRIPE_API_KEY
-from email_helpers import send_email_async, email_balance_reminder_html, email_booking_confirmation_html, email_cancellation_html, email_booking_update_html
-from models import Booking, RefundRequest
+from email_helpers import (
+    send_email_async, 
+    email_balance_reminder_html, 
+    email_booking_confirmation_html, 
+    email_cancellation_html,
+    email_modification_confirmation_html,
+    _it_date
+)
+from models import Booking, BookingUpdate, RefundRequest
 from pricing import compute_refund_amount
 
 router = APIRouter()
@@ -29,6 +36,7 @@ async def create_manual_booking(payload: dict, admin=Depends(get_current_admin))
         total_price = float(payload.get('total_price', 0))
         deposit_amount = float(payload.get('deposit_amount', 0))
 
+        # Estrazione corretta degli ospiti dal payload inviato dal front-end
         adults = int(payload.get('adults', 2))
         children = int(payload.get('children', 0))
 
@@ -44,14 +52,17 @@ async def create_manual_booking(payload: dict, admin=Depends(get_current_admin))
         if not check_in or not check_out:
             raise HTTPException(400, "Date check-in e check-out mancanti")
 
-        # CONTROLLO ANTI-OVERBOOKING PER NUOVA PRENOTAZIONE MANUALE
-        conflict = await db.bookings.find_one({
-            'status': {'$ne': 'cancelled'},
-            'check_in': {'$lt': check_out},
-            'check_out': {'$gt': check_in}
+        # Controllo sovrapposizione date per nuove prenotazioni manuali
+        existing_overlap = await db.bookings.find_one({
+            "status": {"$ne": "cancelled"},
+            "check_in": {"$lt": check_out},
+            "check_out": {"$gt": check_in}
         })
-        if conflict:
-            raise HTTPException(400, f"Date occupate. Questa finestra temporale si sovrappone con la prenotazione attiva di {conflict.get('guest_name')}.")
+        if existing_overlap:
+            raise HTTPException(
+                400,
+                f"Le date richieste si sovrappongono con la prenotazione di {existing_overlap.get('guest_name')} ({_it_date(existing_overlap.get('check_in'))} → {_it_date(existing_overlap.get('check_out'))})"
+            )
 
         settings = await get_settings()
 
@@ -115,6 +126,7 @@ async def create_manual_booking(payload: dict, admin=Depends(get_current_admin))
 
     except Exception as e:
         logging.error(f"Errore creazione manuale: {e}")
+
         raise HTTPException(
             500,
             f"Errore durante il salvataggio: {str(e)}"
@@ -123,60 +135,69 @@ async def create_manual_booking(payload: dict, admin=Depends(get_current_admin))
 @router.patch("/admin/bookings/{booking_id}")
 async def update_booking(
     booking_id: str,
-    payload: dict,
+    updates: BookingUpdate,
     admin=Depends(get_current_admin)
 ):
     decoded_id = urllib.parse.unquote(booking_id)
 
-    # Rimuoviamo chiavi nulle o l'id interno per non alterarlo accidentalmente
-    patch = {k: v for k, v in payload.items() if v is not None and k != "id"}
+    patch = updates.model_dump(exclude_unset=True)
 
     if not patch:
         raise HTTPException(400, 'No fields to update')
 
-    # Trova la prenotazione esistente
-    current_booking = await db.bookings.find_one({'id': decoded_id}, {'_id': 0})
-    if not current_booking and decoded_id != booking_id:
-        current_booking = await db.bookings.find_one({'id': booking_id}, {'_id': 0})
+    # Recupera lo stato attuale della prenotazione per effettuare i dovuti controlli incrociati sulle date
+    current_b = await db.bookings.find_one({'id': decoded_id})
+    if not current_b and decoded_id != booking_id:
+        current_b = await db.bookings.find_one({'id': booking_id})
 
-    if not current_booking:
-        raise HTTPException(404, 'Booking not found')
+    if current_b:
+        new_check_in = patch.get('check_in', current_b.get('check_in'))
+        new_check_out = patch.get('check_out', current_b.get('check_out'))
+        new_status = patch.get('status', current_b.get('status'))
+        
+        # Verifica l'overlapping solo se la prenotazione non è (o non sta venendo) cancellata
+        if new_status != 'cancelled' and new_check_in and new_check_out:
+            existing_overlap = await db.bookings.find_one({
+                "id": {"$ne": current_b['id']},
+                "status": {"$ne": "cancelled"},
+                "check_in": {"$lt": new_check_out},
+                "check_out": {"$gt": new_check_in}
+            })
+            if existing_overlap:
+                raise HTTPException(
+                    400,
+                    f"Le date modificate si sovrappongono con la prenotazione di {existing_overlap.get('guest_name')} ({_it_date(existing_overlap.get('check_in'))} → {_it_date(existing_overlap.get('check_out'))})"
+                )
 
-    # CONTROLLO ANTI-OVERBOOKING PER LA MODIFICA DELLE DATE
-    new_check_in = patch.get('check_in') or current_booking.get('check_in')
-    new_check_out = patch.get('check_out') or current_booking.get('check_out')
-
-    if 'check_in' in patch or 'check_out' in patch:
-        conflict = await db.bookings.find_one({
-            'id': {'$ne': current_booking['id']},
-            'status': {'$ne': 'cancelled'},
-            'check_in': {'$lt': new_check_out},
-            'check_out': {'$gt': new_check_in}
-        })
-        if conflict:
-            raise HTTPException(400, f"Impossibile modificare: le nuove date sono già occupate dalla prenotazione di {conflict.get('guest_name')}.")
-
-    # Esegui l'aggiornamento
-    await db.bookings.update_one(
-        {'id': current_booking['id']},
+    result = await db.bookings.update_one(
+        {'id': decoded_id},
         {'$set': patch}
     )
 
-    # Recupera il documento aggiornato
-    updated_booking = await db.bookings.find_one({'id': current_booking['id']}, {'_id': 0})
+    if result.matched_count == 0 and decoded_id != booking_id:
+        await db.bookings.update_one(
+            {'id': booking_id},
+            {'$set': patch}
+        )
 
-    # INVIO AUTOMATICO DELL'EMAIL DI NOTIFICA MODIFICA ALL'OSPITE
-    guest_email = updated_booking.get('guest_email', '')
-    is_placeholder = not guest_email or guest_email.strip() in ('', 'manual@booking.com')
+    updated_booking = await db.bookings.find_one(
+        {'id': decoded_id},
+        {'_id': 0}
+    )
+    if not updated_booking and decoded_id != booking_id:
+        updated_booking = await db.bookings.find_one({'id': booking_id}, {'_id': 0})
 
-    if not is_placeholder:
-        settings = await get_settings()
-        asyncio.create_task(send_email_async(
-            guest_email,
-            f"Aggiornamento prenotazione — {settings.get('villa_name', 'Light Blue')}",
-            email_booking_update_html(updated_booking, settings),
-        ))
-        logging.info(f"Email di notifica modifica inviata per prenotazione {updated_booking['id']} a {guest_email}")
+    # Invio dell'email di conferma della modifica se la prenotazione è attiva e ha un indirizzo valido
+    if updated_booking and updated_booking.get('status') != 'cancelled':
+        guest_email = updated_booking.get('guest_email', '')
+        is_placeholder = not guest_email or guest_email.strip() in ('', 'manual@booking.com')
+        if not is_placeholder:
+            settings = await get_settings()
+            asyncio.create_task(send_email_async(
+                guest_email,
+                f"Modifica prenotazione — {settings.get('villa_name', 'Light Blue')}",
+                email_modification_confirmation_html(updated_booking, settings),
+            ))
 
     return updated_booking
 
@@ -212,6 +233,9 @@ async def delete_booking(
         or guest_email.strip() in ('', 'manual@booking.com')
     )
 
+    # INVIA EMAIL SOLO SE:
+    # - booking confermata
+    # - booking completamente pagata
     should_send_email = (
         b.get('status') == 'confirmed'
         and b.get('payment_status') == 'fully_paid'
@@ -295,6 +319,7 @@ async def cancel_and_refund(
 
         except Exception as e:
             logging.exception('Stripe refund failed')
+
             raise HTTPException(
                 500,
                 f'Rimborso fallito: {e}'
