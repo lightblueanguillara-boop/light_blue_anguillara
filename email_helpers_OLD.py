@@ -148,6 +148,48 @@ def email_booking_confirmation_html(booking: dict, settings: dict) -> str:
     """
 
 
+def email_modification_confirmation_html(booking: dict, settings: dict) -> str:
+    """Email di modifica prenotazione — stessa grafica esatta della conferma."""
+    villa = settings.get('villa_name', 'Light Blue')
+    choice = booking.get('payment_choice')
+    paid = booking.get('total_price') if choice == 'full' else booking.get('deposit_amount')
+    balance = 0 if choice == 'full' else round(booking.get('total_price', 0) - booking.get('deposit_amount', 0), 2)
+    balance_row = ''
+    if balance > 0:
+        balance_row = f"<tr><td style='padding:8px 0;color:#5C6A79'>Saldo da versare</td><td style='padding:8px 0;text-align:right'>€{balance}</td></tr>"
+
+    pol = _cancellation_policy_info(booking, settings)
+
+    cancellation_block = f"""
+      <tr style="border-top:1px solid #E5E0D8">
+        <td colspan="2" style="padding:16px 0 4px 0">
+          <strong style="color:#2A333C">Politica di cancellazione: {pol['label']}</strong><br/>
+          <span style="color:#5C6A79;font-size:13px">{pol['description']}</span>
+          {"<br/><span style='color:#7A93AC;font-size:13px;margin-top:4px;display:inline-block'>" + pol['deadline_text'] + "</span>" if pol['deadline_text'] else ""}
+        </td>
+      </tr>
+    """
+
+    return f"""
+    <div style="font-family:Manrope,Arial,sans-serif;max-width:560px;margin:0 auto;padding:32px;background:#FAF9F6;color:#2A333C">
+      <h1 style="font-family:'Outfit',sans-serif;font-weight:300;font-size:28px;letter-spacing:-0.5px">Prenotazione modificata</h1>
+      <p>Ciao {booking.get('guest_name')},</p>
+      <p>ti confermiamo che i dettagli della tua prenotazione presso <strong>{villa}</strong> sono stati aggiornati.</p>
+      <table style="width:100%;border-collapse:collapse;margin:24px 0">
+        <tr><td style="padding:8px 0;color:#5C6A79">Check-in</td><td style="padding:8px 0;text-align:right"><strong>{_it_date(booking.get('check_in'))}</strong></td></tr>
+        <tr><td style="padding:8px 0;color:#5C6A79">Check-out</td><td style="padding:8px 0;text-align:right"><strong>{_it_date(booking.get('check_out'))}</strong></td></tr>
+        <tr><td style="padding:8px 0;color:#5C6A79">Ospiti</td><td style="padding:8px 0;text-align:right">{booking.get('adults')} adulti, {booking.get('children')} bambini</td></tr>
+        <tr><td style="padding:8px 0;color:#5C6A79">Totale soggiorno</td><td style="padding:8px 0;text-align:right">€{booking.get('total_price')}</td></tr>
+        <tr style="border-top:1px solid #E5E0D8"><td style="padding:12px 0;color:#5C6A79">Pagato</td><td style="padding:12px 0;text-align:right;color:#7A93AC"><strong>€{paid}</strong></td></tr>
+        {balance_row}
+        {cancellation_block}
+      </table>
+      <p>A presto,<br/>{villa}</p>
+      <p style="color:#5C6A79;font-size:12px;margin-top:32px">{settings.get('villa_address','')}<br/>CIR {settings.get('villa_cir','')}</p>
+    </div>
+    """
+
+
 def email_balance_reminder_html(booking: dict, settings: dict) -> str:
     villa = settings.get('villa_name', 'Light Blue')
     balance = round(booking.get('total_price', 0) - booking.get('deposit_amount', 0), 2)
