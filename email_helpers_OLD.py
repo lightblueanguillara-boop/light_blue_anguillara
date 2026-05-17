@@ -30,8 +30,8 @@ def _cancellation_policy_info(booking: dict, settings: dict) -> dict:
 
     Regole (allineate a compute_refund_amount in pricing.py):
       - flexible : rimborso 100% fino a 24h prima del check-in
-      - moderate : rimborso 100% fino a 5 giorni prima del check-in;
-                   50% da 1 a 5 giorni; 0% nelle ultime 24h
+      - moderate : rimborso 100% fino a 7 giorni prima del check-in;
+                   50% da 1 a 7 giorni; 0% nelle ultime 24h
       - strict   : rimborso 100% entro 48h dalla prenotazione E
                    almeno 14 giorni prima del check-in;
                    50% fino a 7 giorni prima; 0% oltre
@@ -64,11 +64,11 @@ def _cancellation_policy_info(booking: dict, settings: dict) -> dict:
 
     elif policy == 'moderate':
         description = (
-            'Rimborso completo (100%) se disdici almeno 5 giorni prima del check-in. '
-            'Rimborso del 50% da 1 a 5 giorni prima. '
+            'Rimborso completo (100%) se disdici almeno 7 giorni prima del check-in. '
+            'Rimborso del 50% da 1 a 7 giorni prima. '
             'Nessun rimborso nelle ultime 24 ore.'
         )
-        deadline_dt = check_in_dt - timedelta(days=5) if check_in_dt else None
+        deadline_dt = check_in_dt - timedelta(days=7) if check_in_dt else None
         deadline_label = 'Disdetta gratuita entro'
 
     else:  # strict
@@ -158,6 +158,49 @@ def email_balance_reminder_html(booking: dict, settings: dict) -> str:
       <p>ti ricordiamo che per il tuo soggiorno a <strong>{villa}</strong> dal {_it_date(booking.get('check_in'))} al {_it_date(booking.get('check_out'))} è previsto un saldo residuo di <strong style="color:#7A93AC">€{balance}</strong>.</p>
       <p>Ti chiediamo gentilmente di completare il pagamento. Per qualsiasi domanda rispondi a questa email.</p>
       <p>Grazie,<br/>{villa}</p>
+    </div>
+    """
+
+
+def email_cancellation_html(booking: dict, settings: dict) -> str:
+    """Email di cancellazione prenotazione — stessa grafica della conferma."""
+    villa = settings.get('villa_name', 'Light Blue')
+    total_paid = 0.0
+    if booking.get('payment_status') == 'deposit_paid':
+        total_paid = booking.get('deposit_amount', 0)
+    elif booking.get('payment_status') == 'fully_paid':
+        total_paid = booking.get('total_price', 0)
+
+    refund_row = ''
+    if total_paid and total_paid > 0:
+        refund_row = f"""
+        <tr style="border-top:1px solid #E5E0D8">
+          <td colspan="2" style="padding:16px 0 4px 0">
+            <strong style="color:#2A333C">Rimborso</strong><br/>
+            <span style="color:#5C6A79;font-size:13px">
+              Il rimborso verrà accreditato entro
+              <strong>5 giorni lavorativi</strong> sul metodo di pagamento originale.
+            </span>
+          </td>
+        </tr>"""
+
+    return f"""
+    <div style="font-family:Manrope,Arial,sans-serif;max-width:560px;margin:0 auto;padding:32px;background:#FAF9F6;color:#2A333C">
+      <h1 style="font-family:'Outfit',sans-serif;font-weight:300;font-size:28px;letter-spacing:-0.5px">Prenotazione cancellata</h1>
+      <p>Ciao {booking.get('guest_name')},</p>
+      <p>la tua prenotazione presso <strong>{villa}</strong> è stata cancellata.</p>
+      <table style="width:100%;border-collapse:collapse;margin:24px 0">
+        <tr><td style="padding:8px 0;color:#5C6A79">Check-in</td><td style="padding:8px 0;text-align:right"><strong>{_it_date(booking.get('check_in'))}</strong></td></tr>
+        <tr><td style="padding:8px 0;color:#5C6A79">Check-out</td><td style="padding:8px 0;text-align:right"><strong>{_it_date(booking.get('check_out'))}</strong></td></tr>
+        <tr><td style="padding:8px 0;color:#5C6A79">Ospiti</td><td style="padding:8px 0;text-align:right">{booking.get('adults', 1)} adulti, {booking.get('children', 0)} bambini</td></tr>
+        <tr><td style="padding:8px 0;color:#5C6A79">Totale soggiorno</td><td style="padding:8px 0;text-align:right">€{booking.get('total_price')}</td></tr>
+        {refund_row}
+      </table>
+      <p style="color:#5C6A79;font-size:14px">
+        Per qualsiasi domanda o chiarimento non esitare a contattarci.
+      </p>
+      <p>A presto,<br/>{villa}</p>
+      <p style="color:#5C6A79;font-size:12px;margin-top:32px">{settings.get('villa_address','')}<br/>CIR {settings.get('villa_cir','')}</p>
     </div>
     """
 
