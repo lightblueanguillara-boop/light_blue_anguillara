@@ -205,6 +205,77 @@ def email_cancellation_html(booking: dict, settings: dict) -> str:
     """
 
 
+def email_guest_contact_confirmation_html(msg: dict) -> str:
+    """Email di conferma ricezione contatto inviata automaticamente all'ospite."""
+    name = msg.get('name', '').split()[0] if msg.get('name') else 'Ospite'
+    return f"""<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html dir="ltr" lang="it">
+  <head>
+    <meta content="width=device-width" name="viewport" />
+    <meta content="text/html; charset=UTF-8" http-equiv="Content-Type" />
+  </head>
+  <body style="background-color:#ffffff">
+    <table border="0" width="100%" cellpadding="0" cellspacing="0" role="presentation" align="center">
+      <tbody>
+        <tr>
+          <td style="background-color:#ffffff" align="center">
+            <table align="center" width="100%" border="0" cellpadding="0" cellspacing="0" role="presentation" style="max-width:600px;margin:0 auto;width:100%;color:#000000;background-color:#ffffff;padding:0px;">
+              <tbody>
+                <tr>
+                  <td align="center" style="padding:60px 20px">
+                    <table align="center" width="100%" border="0" cellpadding="0" cellspacing="0" role="presentation" style="margin:0 auto;max-width:500px;text-align:center">
+                      <tbody>
+                        <tr>
+                          <td align="center" style="padding:0;padding-bottom:10px">
+                            <img alt="Logo Light Blue" src="https://www.lightblueanguillara.com/favicon.ico" width="80" style="display:block;border:0;" />
+                          </td>
+                        </tr>
+                        <tr>
+                          <td align="center" style="padding:0;padding-bottom:40px">
+                            <h1 style="margin:0;font-size:26px;font-weight:normal;color:#1a4a5e;letter-spacing:4px;text-transform:uppercase">LIGHT BLUE</h1>
+                            <p style="margin:8px 0 0 0;font-size:14px;font-style:italic;color:#19a7d7;letter-spacing:1px"><em>Anguillara Sabazia</em></p>
+                          </td>
+                        </tr>
+                        <tr>
+                          <td align="left" style="padding:0;padding-bottom:50px;font-size:17px;line-height:1.8;color:#333333;text-align:left">
+                            <p style="margin:0;padding:0">
+                              Gentile {name},<br /><br />
+                              abbiamo ricevuto la tua richiesta e ti ringraziamo per averci contattato.<br /><br />
+                              Il nostro team la esaminerà al più presto e ti risponderà entro 24 ore.<br /><br />
+                              <em style="color:#5C6A79;font-size:15px">Per favore non rispondere a questa email — la casella non è monitorata. Per urgenze puoi contattarci direttamente tramite il sito.</em>
+                            </p>
+                          </td>
+                        </tr>
+                        <tr>
+                          <td align="center" style="padding:0">
+                            <table border="0" cellpadding="0" cellspacing="0" role="presentation">
+                              <tr>
+                                <td align="center" style="background-color:#07445a;border-radius:2px">
+                                  <a href="https://www.lightblueanguillara.com" style="color:#ffffff;text-decoration:none;display:inline-block;padding:20px 45px;font-family:Helvetica, Arial, sans-serif;font-size:13px;font-weight:bold;letter-spacing:2px;text-transform:uppercase" target="_blank">Vai al sito</a>
+                                </td>
+                              </tr>
+                            </table>
+                          </td>
+                        </tr>
+                        <tr>
+                          <td align="center" style="padding:0;padding-top:80px">
+                            <p style="margin:0;font-size:11px;color:#999999;letter-spacing:1px;text-transform:uppercase">Light Blue Anguillara Sabazia</p>
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </body>
+</html>"""
+
+
 def email_admin_contact_notification_html(msg: dict) -> str:
     return f"""
     <div style="font-family:Manrope,Arial,sans-serif;max-width:560px;margin:0 auto;padding:32px;color:#2A333C">
