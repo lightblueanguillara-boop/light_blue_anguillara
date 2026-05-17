@@ -11,42 +11,100 @@ from models import MessageUpdate
 
 router = APIRouter()
 
+
 class MessageReply(BaseModel):
     subject: str
     html: str
 
+
 @router.get("/admin/messages")
 async def list_messages(admin=Depends(get_current_admin)):
-    return await db.contact_messages.find({}, {'_id': 0}).sort('created_at', -1).to_list(10000)
+    return await db.contact_messages.find(
+        {},
+        {'_id': 0}
+    ).sort('created_at', -1).to_list(10000)
+
 
 @router.patch("/admin/messages/{msg_id}")
 async def update_message(
-    msg_id: str, updates: MessageUpdate, admin=Depends(get_current_admin)
+    msg_id: str,
+    updates: MessageUpdate,
+    admin=Depends(get_current_admin)
 ):
     patch = updates.model_dump(exclude_unset=True)
+
     if not patch:
         raise HTTPException(400, 'No fields to update')
-    await db.contact_messages.update_one({'id': msg_id}, {'$set': patch})
-    return await db.contact_messages.find_one({'id': msg_id}, {'_id': 0})
+
+    await db.contact_messages.update_one(
+        {'id': msg_id},
+        {'$set': patch}
+    )
+
+    return await db.contact_messages.find_one(
+        {'id': msg_id},
+        {'_id': 0}
+    )
+
 
 @router.post("/admin/messages/{msg_id}/reply")
 async def reply_message(
-    msg_id: str, body: MessageReply, admin=Depends(get_current_admin)
+    msg_id: str,
+    body: MessageReply,
+    admin=Depends(get_current_admin)
 ):
     """Invia l'email e salva la risposta nella cronologia 'chat'."""
-    msg = await db.contact_messages.find_one({'id': msg_id}, {'_id': 0})
+
+    msg = await db.contact_messages.find_one(
+        {'id': msg_id},
+        {'_id': 0}
+    )
+
     if not msg:
         raise HTTPException(404, 'Messaggio non trovato')
 
+    # Email HTML più strutturata (anti-spam)
+    email_html = f"""
+    <div style="
+        font-family:Arial,sans-serif;
+        max-width:600px;
+        margin:0 auto;
+        padding:32px;
+        color:#2A333C;
+        line-height:1.7;
+    ">
+
+        <p>Ciao {msg.get('name', '')},</p>
+
+        <div style="margin:24px 0;">
+            {body.html.replace('\n', '<br/>')}
+        </div>
+
+        <p style="margin-top:32px;">
+            Cordiali saluti,<br/>
+            <strong>Light Blue</strong>
+        </p>
+
+    </div>
+    """
+
     # Invia l'email reale
-    ok = await send_email_async(msg['email'], body.subject, body.html)
+    ok = await send_email_async(
+        msg['email'],
+        body.subject,
+        email_html
+    )
+
     if not ok:
-        raise HTTPException(502, 'Invio email fallito — controlla le credenziali Resend')
+        raise HTTPException(
+            502,
+            'Invio email fallito — controlla le credenziali Resend'
+        )
 
     # Crea l'oggetto risposta da salvare nel DB
     new_reply = {
         "id": str(uuid.uuid4()),
-        "content": body.html,
+        "content": email_html,
         "subject": body.subject,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "sender": "admin"
@@ -57,18 +115,34 @@ async def reply_message(
         {'id': msg_id},
         {
             '$push': {'chat': new_reply},
-            '$set': {'status': 'replied', 'updated_at': datetime.now(timezone.utc).isoformat()}
+            '$set': {
+                'status': 'replied',
+                'updated_at': datetime.now(timezone.utc).isoformat()
+            }
         }
     )
 
-    return await db.contact_messages.find_one({'id': msg_id}, {'_id': 0})
+    return await db.contact_messages.find_one(
+        {'id': msg_id},
+        {'_id': 0}
+    )
+
 
 @router.delete("/admin/messages/{msg_id}")
-async def delete_message(msg_id: str, admin=Depends(get_current_admin)):
+async def delete_message(
+    msg_id: str,
+    admin=Depends(get_current_admin)
+):
     """Elimina definitivamente una chat/messaggio dal database."""
+
     msg = await db.contact_messages.find_one({'id': msg_id})
+
     if not msg:
         raise HTTPException(404, 'Messaggio non trovato')
-    
+
     await db.contact_messages.delete_one({'id': msg_id})
-    return {'ok': True, 'detail': 'Messaggio eliminato con successo'}
+
+    return {
+        'ok': True,
+        'detail': 'Messaggio eliminato con successo'
+    }
