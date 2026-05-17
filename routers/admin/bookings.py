@@ -11,8 +11,8 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from auth import get_current_admin
 from db import db, get_settings, STRIPE_API_KEY
-from email_helpers import send_email_async, email_balance_reminder_html, email_booking_confirmation_html, email_cancellation_html
-from models import Booking, BookingUpdate, RefundRequest
+from email_helpers import send_email_async, email_balance_reminder_html, email_booking_confirmation_html, email_cancellation_html, email_booking_update_html
+from models import Booking, RefundRequest
 from pricing import compute_refund_amount
 
 router = APIRouter()
@@ -29,7 +29,6 @@ async def create_manual_booking(payload: dict, admin=Depends(get_current_admin))
         total_price = float(payload.get('total_price', 0))
         deposit_amount = float(payload.get('deposit_amount', 0))
 
-        # Estrazione corretta degli ospiti dal payload inviato dal front-end
         adults = int(payload.get('adults', 2))
         children = int(payload.get('children', 0))
 
@@ -38,6 +37,21 @@ async def create_manual_booking(payload: dict, admin=Depends(get_current_admin))
 
         if placeholder_email:
             guest_email = "manual@booking.com"
+
+        check_in = payload.get('check_in')
+        check_out = payload.get('check_out')
+
+        if not check_in or not check_out:
+            raise HTTPException(400, "Date check-in e check-out mancanti")
+
+        # CONTROLLO ANTI-OVERBOOKING PER NUOVA PRENOTAZIONE MANUALE
+        conflict = await db.bookings.find_one({
+            'status': {'$ne': 'cancelled'},
+            'check_in': {'$lt': check_out},
+            'check_out': {'$gt': check_in}
+        })
+        if conflict:
+            raise HTTPException(400, f"Date occupate. Questa finestra temporale si sovrappone con la prenotazione attiva di {conflict.get('guest_name')}.")
 
         settings = await get_settings()
 
@@ -51,8 +65,8 @@ async def create_manual_booking(payload: dict, admin=Depends(get_current_admin))
             "guest_name": payload.get('guest_name', 'Ospite Manuale'),
             "guest_email": guest_email,
             "guest_phone": payload.get('guest_phone', ''),
-            "check_in": payload.get('check_in'),
-            "check_out": payload.get('check_out'),
+            "check_in": check_in,
+            "check_out": check_out,
             "adults": adults,
             "children": children,
             "total_price": total_price,
@@ -66,9 +80,6 @@ async def create_manual_booking(payload: dict, admin=Depends(get_current_admin))
             "consent_newsletter": False,
             "created_at": datetime.now(timezone.utc).isoformat()
         }
-
-        if not booking_data['check_in'] or not booking_data['check_out']:
-            raise HTTPException(400, "Date check-in e check-out mancanti")
 
         await db.bookings.insert_one(booking_data)
 
@@ -104,7 +115,6 @@ async def create_manual_booking(payload: dict, admin=Depends(get_current_admin))
 
     except Exception as e:
         logging.error(f"Errore creazione manuale: {e}")
-
         raise HTTPException(
             500,
             f"Errore durante il salvataggio: {str(e)}"
@@ -113,31 +123,62 @@ async def create_manual_booking(payload: dict, admin=Depends(get_current_admin))
 @router.patch("/admin/bookings/{booking_id}")
 async def update_booking(
     booking_id: str,
-    updates: BookingUpdate,
+    payload: dict,
     admin=Depends(get_current_admin)
 ):
     decoded_id = urllib.parse.unquote(booking_id)
 
-    patch = updates.model_dump(exclude_unset=True)
+    # Rimuoviamo chiavi nulle o l'id interno per non alterarlo accidentalmente
+    patch = {k: v for k, v in payload.items() if v is not None and k != "id"}
 
     if not patch:
         raise HTTPException(400, 'No fields to update')
 
-    result = await db.bookings.update_one(
-        {'id': decoded_id},
+    # Trova la prenotazione esistente
+    current_booking = await db.bookings.find_one({'id': decoded_id}, {'_id': 0})
+    if not current_booking and decoded_id != booking_id:
+        current_booking = await db.bookings.find_one({'id': booking_id}, {'_id': 0})
+
+    if not current_booking:
+        raise HTTPException(404, 'Booking not found')
+
+    # CONTROLLO ANTI-OVERBOOKING PER LA MODIFICA DELLE DATE
+    new_check_in = patch.get('check_in') or current_booking.get('check_in')
+    new_check_out = patch.get('check_out') or current_booking.get('check_out')
+
+    if 'check_in' in patch or 'check_out' in patch:
+        conflict = await db.bookings.find_one({
+            'id': {'$ne': current_booking['id']},
+            'status': {'$ne': 'cancelled'},
+            'check_in': {'$lt': new_check_out},
+            'check_out': {'$gt': new_check_in}
+        })
+        if conflict:
+            raise HTTPException(400, f"Impossibile modificare: le nuove date sono già occupate dalla prenotazione di {conflict.get('guest_name')}.")
+
+    # Esegui l'aggiornamento
+    await db.bookings.update_one(
+        {'id': current_booking['id']},
         {'$set': patch}
     )
 
-    if result.matched_count == 0 and decoded_id != booking_id:
-        await db.bookings.update_one(
-            {'id': booking_id},
-            {'$set': patch}
-        )
+    # Recupera il documento aggiornato
+    updated_booking = await db.bookings.find_one({'id': current_booking['id']}, {'_id': 0})
 
-    return await db.bookings.find_one(
-        {'id': decoded_id},
-        {'_id': 0}
-    )
+    # INVIO AUTOMATICO DELL'EMAIL DI NOTIFICA MODIFICA ALL'OSPITE
+    guest_email = updated_booking.get('guest_email', '')
+    is_placeholder = not guest_email or guest_email.strip() in ('', 'manual@booking.com')
+
+    if not is_placeholder:
+        settings = await get_settings()
+        asyncio.create_task(send_email_async(
+            guest_email,
+            f"Aggiornamento prenotazione — {settings.get('villa_name', 'Light Blue')}",
+            email_booking_update_html(updated_booking, settings),
+        ))
+        logging.info(f"Email di notifica modifica inviata per prenotazione {updated_booking['id']} a {guest_email}")
+
+    return updated_booking
 
 @router.delete("/admin/bookings/{booking_id}")
 async def delete_booking(
@@ -171,9 +212,6 @@ async def delete_booking(
         or guest_email.strip() in ('', 'manual@booking.com')
     )
 
-    # INVIA EMAIL SOLO SE:
-    # - booking confermata
-    # - booking completamente pagata
     should_send_email = (
         b.get('status') == 'confirmed'
         and b.get('payment_status') == 'fully_paid'
@@ -257,7 +295,6 @@ async def cancel_and_refund(
 
         except Exception as e:
             logging.exception('Stripe refund failed')
-
             raise HTTPException(
                 500,
                 f'Rimborso fallito: {e}'
