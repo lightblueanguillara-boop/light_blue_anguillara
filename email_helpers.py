@@ -241,7 +241,7 @@ def email_guest_contact_confirmation_html(msg: dict) -> str:
                             <p style="margin:0;padding:0">
                               Gentile {name},<br /><br />
                               abbiamo ricevuto la tua richiesta e ti ringraziamo per averci contattato.<br /><br />
-                              Il nostro team la esaminerà al più presto e ti risponderà entro 24 ore.<br /><br />
+                              Il nostro team la esaminerà e ti risponderemo al più presto.<br /><br />
                               <em style="color:#5C6A79;font-size:15px">Per favore non rispondere a questa email — la casella non è monitorata. Per urgenze puoi contattarci direttamente tramite il sito.</em>
                             </p>
                           </td>
