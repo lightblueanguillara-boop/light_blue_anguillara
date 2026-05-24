@@ -45,6 +45,7 @@ def price_for_date(d: date, settings: dict) -> float:
 
 
 async def compute_stay_pricing(check_in: str, check_out: str):
+    """Calcola il prezzo base (Rimborsabile) per un soggiorno."""
     settings = await get_settings()
     total = 0.0
     nights = 0
@@ -61,6 +62,46 @@ async def compute_stay_pricing(check_in: str, check_out: str):
         'total': round(total, 2),
         'deposit_amount': deposit,
         'deposit_percent': deposit_pct,
+        'breakdown': breakdown,
+    }
+
+
+async def compute_dual_pricing(check_in: str, check_out: str):
+    """
+    Calcola entrambe le tariffe: Rimborsabile e Non Rimborsabile.
+    
+    Ritorna un dizionario con:
+    - refundable_total: prezzo pieno (Rimborsabile)
+    - non_refundable_total: prezzo scontato (Non Rimborsabile)
+    - nights: numero di notti
+    - deposit_amount: acconto calcolato sul totale rimborsabile
+    - discount_percent: percentuale di sconto applicata
+    - breakdown: elenco prezzi giornalieri
+    """
+    settings = await get_settings()
+    total = 0.0
+    nights = 0
+    breakdown = []
+    for d in daterange(check_in, check_out):
+        p = price_for_date(d, settings)
+        total += p
+        nights += 1
+        breakdown.append({'date': d.isoformat(), 'price': p})
+    
+    deposit_pct = settings.get('deposit_percent', 30.0)
+    deposit = round(total * deposit_pct / 100.0, 2)
+    
+    # Calcolo sconto per tariffa non rimborsabile
+    discount_pct = settings.get('non_refundable_discount_percent', 5.0)
+    non_refundable_total = round(total * (1 - discount_pct / 100.0), 2)
+    
+    return {
+        'nights': nights,
+        'refundable_total': round(total, 2),
+        'non_refundable_total': non_refundable_total,
+        'deposit_amount': deposit,
+        'deposit_percent': deposit_pct,
+        'discount_percent': discount_pct,
         'breakdown': breakdown,
     }
 
@@ -82,44 +123,41 @@ async def dates_available(check_in: str, check_out: str, exclude_id: Optional[st
 
 
 def compute_refund_amount(booking: dict) -> dict:
-    """Airbnb-style policy:
-    - flexible: 100% fino a 24h prima del check-in; 0% oltre
-    - moderate: 100% fino a 7 giorni prima del check-in; 50% fino a 24h; 0% oltre
-    - strict:   100% entro 48h dalla prenotazione E >=14gg prima del check-in;
-                50% fino a 7gg prima; 0% oltre
     """
-    policy = booking.get('cancellation_policy', 'moderate')
+    Logica semplificata di rimborso basata su is_refundable:
+    - is_refundable = True:  100% rimborso se cancellato almeno 10 giorni prima del check-in; 0% altrimenti
+    - is_refundable = False: 0% sempre
+    """
+    is_refundable = booking.get('is_refundable', True)
     total_paid = 0.0
     if booking.get('payment_status') == 'deposit_paid':
         total_paid = booking.get('deposit_amount', 0)
     elif booking.get('payment_status') == 'fully_paid':
         total_paid = booking.get('total_price', 0)
+    
+    # Se non è rimborsabile, rimborso sempre 0
+    if not is_refundable:
+        return {
+            'refund': 0.0,
+            'percent': 0,
+            'reason': 'Tariffa Non Rimborsabile: nessun rimborso',
+            'paid': total_paid
+        }
+    
+    # Se è rimborsabile, applica la regola dei 10 giorni
     now = datetime.now(timezone.utc)
-    check_in = datetime.strptime(booking['check_in'], '%Y-%m-%d').replace(tzinfo=timezone.utc)
-    created = datetime.fromisoformat(booking.get('created_at')) if booking.get('created_at') else now
-    if created.tzinfo is None:
-        created = created.replace(tzinfo=timezone.utc)
-    hours_to_checkin = (check_in - now).total_seconds() / 3600
-    hours_since_booking = (now - created).total_seconds() / 3600
+    try:
+        check_in = datetime.strptime(booking['check_in'], '%Y-%m-%d').replace(tzinfo=timezone.utc)
+    except (KeyError, ValueError, TypeError):
+        return {'refund': 0.0, 'percent': 0, 'reason': 'Data check-in non valida', 'paid': total_paid}
+    
+    days_to_checkin = (check_in - now).total_seconds() / (3600 * 24)
+    
     pct, reason = 0, ''
-    if policy == 'flexible':
-        if hours_to_checkin >= 24:
-            pct, reason = 100, 'Flessibile: >24h dal check-in'
-        else:
-            pct, reason = 0, 'Flessibile: <24h dal check-in'
-    elif policy == 'moderate':
-        if hours_to_checkin >= 24 * 7:
-            pct, reason = 100, 'Moderata: >7 giorni dal check-in'
-        elif hours_to_checkin >= 24:
-            pct, reason = 50, 'Moderata: 1-7 giorni dal check-in'
-        else:
-            pct, reason = 0, 'Moderata: <24h dal check-in'
-    else:  # strict
-        if hours_since_booking <= 48 and hours_to_checkin >= 24 * 14:
-            pct, reason = 100, 'Rigorosa: entro 48h dalla prenotazione e >14 giorni dal check-in'
-        elif hours_to_checkin >= 24 * 7:
-            pct, reason = 50, 'Rigorosa: >7 giorni dal check-in'
-        else:
-            pct, reason = 0, 'Rigorosa: condizioni non soddisfatte'
+    if days_to_checkin >= 10:
+        pct, reason = 100, 'Rimborsabile: >10 giorni dal check-in'
+    else:
+        pct, reason = 0, 'Rimborsabile: <10 giorni dal check-in'
+    
     refund = round(total_paid * pct / 100.0, 2)
     return {'refund': refund, 'percent': pct, 'reason': reason, 'paid': total_paid}
