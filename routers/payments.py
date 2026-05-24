@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException, Request, BackgroundTasks
 from db import db, get_settings, STRIPE_API_KEY, STRIPE_WEBHOOK_SECRET
 from email_helpers import send_email_async, email_booking_confirmation_html
 from models import Booking, BookingCreate, PaymentTransaction, Subscriber
-from pricing import compute_stay_pricing, dates_available
+from pricing import compute_dual_pricing, dates_available
 
 router = APIRouter()
 stripe.api_key = STRIPE_API_KEY
@@ -94,16 +94,16 @@ async def create_booking_checkout(payload: BookingCreate, request: Request, back
     if not await dates_available(payload.check_in, payload.check_out):
         raise HTTPException(409, 'Date non disponibili')
 
-    pricing = await compute_stay_pricing(payload.check_in, payload.check_out)
-    # ---------------------------------------------------------------
-    # FIX: leggiamo la politica di cancellazione dalle impostazioni
-    # globali della villa, così che rispecchi sempre quanto configurato
-    # nella dashboard e non un valore hardcoded del modello.
-    # ---------------------------------------------------------------
+    pricing = await compute_dual_pricing(payload.check_in, payload.check_out)
     settings = await get_settings()
-    cancellation_policy = settings.get('default_cancellation_policy', 'moderate')
-
-    amount = pricing['total'] if payload.payment_choice == 'full' else pricing['deposit_amount']
+    
+    # Seleziona il prezzo corretto in base alla scelta is_refundable
+    if payload.is_refundable:
+        base_price = pricing['refundable_total']
+    else:
+        base_price = pricing['non_refundable_total']
+    
+    amount = base_price if payload.payment_choice == 'full' else round(base_price * settings.get('deposit_percent', 30.0) / 100.0, 2)
     amount_cents = int(round(amount * 100))
 
     booking = Booking(
@@ -114,16 +114,13 @@ async def create_booking_checkout(payload: BookingCreate, request: Request, back
         check_out=payload.check_out,
         adults=payload.adults,
         children=payload.children,
-        total_price=pricing['total'],
-        deposit_amount=pricing['deposit_amount'],
+        total_price=base_price,
+        deposit_amount=round(base_price * settings.get('deposit_percent', 30.0) / 100.0, 2),
         payment_choice=payload.payment_choice,
-        # -------------------------------------------------------
-        # FIX: cancellation_policy letta dinamicamente dalle settings
-        # -------------------------------------------------------
-        cancellation_policy=cancellation_policy,
+        is_refundable=payload.is_refundable,
         status='pending',
         payment_status='unpaid',
-        source='website',  # <--- Specifichiamo che viene dal sito
+        source='website',
         notes=payload.notes,
         consent_newsletter=payload.consent_newsletter,
     )
