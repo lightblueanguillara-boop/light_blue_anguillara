@@ -166,3 +166,21 @@ async def balance_reminder(booking_id: str, admin=Depends(get_current_admin)):
         {'$set': {'last_reminder_at': datetime.now(timezone.utc).isoformat()}}
     )
     return {'ok': ok}
+
+@router.delete("/admin/bookings/{booking_id}")
+async def admin_delete_booking_permanently(booking_id: str, admin=Depends(get_current_admin)):
+    """
+    Rimuove definitivamente una prenotazione dal database (Hard Delete).
+    Risolve il problema del 404 Not Found quando si preme sul cestino dal pannello admin.
+    """
+    decoded_id = urllib.parse.unquote(booking_id)
+
+    # Verifica se la prenotazione esiste
+    b = await db.bookings.find_one({'id': decoded_id})
+    if not b:
+        raise HTTPException(status_code=404, detail="Prenotazione non trovata")
+
+    # Eliminazione fisica e permanente della risorsa dal database
+    await db.bookings.delete_one({'id': decoded_id})
+
+    return {"ok": True, "message": "Prenotazione eliminata definitivamente"}
