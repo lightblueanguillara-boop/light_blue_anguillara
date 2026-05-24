@@ -66,10 +66,8 @@ async def create_manual_booking(payload: dict, admin=Depends(get_current_admin))
 
         settings = await get_settings()
 
-        cancellation_policy = (
-            payload.get('cancellation_policy')
-            or settings.get('default_cancellation_policy', 'moderate')
-        )
+        # Nuovo campo is_refundable con default True
+        is_refundable = payload.get('is_refundable', True)
 
         booking_data = {
             "id": payload.get('id') or str(uuid.uuid4()),
@@ -83,7 +81,7 @@ async def create_manual_booking(payload: dict, admin=Depends(get_current_admin))
             "total_price": total_price,
             "deposit_amount": deposit_amount,
             "payment_choice": payload.get('payment_choice', 'full'),
-            "cancellation_policy": cancellation_policy,
+            "is_refundable": is_refundable,
             "status": 'confirmed',
             "payment_status": payload.get('payment_status', 'unpaid'),
             "source": 'manual',
