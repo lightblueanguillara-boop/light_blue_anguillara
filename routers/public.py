@@ -1,7 +1,7 @@
 """Public routes: villa info, availability, contact, newsletter, iCal export, and Gallery."""
 import asyncio
 from datetime import datetime, timezone, timedelta
-from typing import Optional, List # Aggiunto List
+from typing import Optional, List
 
 from fastapi import APIRouter, HTTPException, Response
 from icalendar import Calendar, Event
@@ -9,8 +9,8 @@ from pydantic import EmailStr
 
 from db import db, get_settings, ADMIN_NOTIFY_EMAIL
 from email_helpers import send_email_async, email_admin_contact_notification_html, email_guest_contact_confirmation_html
-from models import ContactMessage, ContactCreate, Subscriber, GalleryImage # Aggiunto GalleryImage
-from pricing import compute_stay_pricing, dates_available, daterange
+from models import ContactMessage, ContactCreate, Subscriber, GalleryImage
+from pricing import compute_stay_pricing, compute_dual_pricing, dates_available, daterange
 
 router = APIRouter()
 
@@ -33,7 +33,7 @@ async def villa_info():
         'lake': s.get('villa_lake', 'Lago di Bracciano'),
         'default_price_per_night': s.get('default_price_per_night'),
         'deposit_percent': s.get('deposit_percent'),
-        'default_cancellation_policy': s.get('default_cancellation_policy'),
+        'non_refundable_discount_percent': s.get('non_refundable_discount_percent', 5.0),
     }
 
 # --- NUOVA ROTTA GALLERIA PUBBLICA ---
@@ -60,11 +60,21 @@ async def availability(start: str, end: str):
 
 @router.post("/quote")
 async def quote(check_in: str, check_out: str):
+    """
+    Endpoint di preventivo che ritorna entrambe le tariffe:
+    - refundable_total: prezzo pieno (Rimborsabile)
+    - non_refundable_total: prezzo scontato (Non Rimborsabile)
+    """
     if check_in >= check_out:
         raise HTTPException(400, 'check_out must be after check_in')
-    pricing = await compute_stay_pricing(check_in, check_out)
+    
+    pricing = await compute_dual_pricing(check_in, check_out)
     available = await dates_available(check_in, check_out)
-    return {**pricing, 'available': available}
+    
+    return {
+        **pricing,
+        'available': available
+    }
 
 
 @router.post("/contact")
