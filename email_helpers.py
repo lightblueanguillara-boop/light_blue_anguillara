@@ -21,76 +21,45 @@ def _it_date(iso: str) -> str:
 def _cancellation_policy_info(booking: dict, settings: dict) -> dict:
     """
     Restituisce il testo descrittivo della politica di cancellazione
-    e la data ultima entro cui è possibile disdire con rimborso completo.
-
-    La politica viene letta in questo ordine:
-      1. booking['cancellation_policy'] (salvato al momento della prenotazione)
-      2. settings['default_cancellation_policy'] (fallback dalle impostazioni)
-      3. 'moderate' (default assoluto)
-
-    Regole (allineate a compute_refund_amount in pricing.py):
-      - flexible : rimborso 100% fino a 24h prima del check-in
-      - moderate : rimborso 100% fino a 7 giorni prima del check-in;
-                   50% da 1 a 7 giorni; 0% nelle ultime 24h
-      - strict   : rimborso 100% entro 48h dalla prenotazione E
-                   almeno 14 giorni prima del check-in;
-                   50% fino a 7 giorni prima; 0% oltre
+    basato sul campo is_refundable della prenotazione.
+    
+    Regole nuove:
+    - is_refundable = True:  "Rimborso completo (100%) fino a 10 giorni prima del check-in"
+    - is_refundable = False: "Nessun rimborso in caso di cancellazione o mancata presentazione"
     """
-    policy = (
-        booking.get('cancellation_policy')
-        or settings.get('default_cancellation_policy')
-        or 'moderate'
-    )
-
+    is_refundable = booking.get('is_refundable', True)
+    
     try:
         check_in_dt = datetime.strptime(booking['check_in'], '%Y-%m-%d').replace(tzinfo=timezone.utc)
     except (KeyError, ValueError, TypeError):
         check_in_dt = None
-
-    labels = {
-        'flexible': 'Flessibile',
-        'moderate': 'Moderata',
-        'strict':   'Rigorosa',
-    }
-    label = labels.get(policy, policy.capitalize())
-
-    if policy == 'flexible':
+    
+    if is_refundable:
+        label = 'Rimborsabile'
         description = (
-            'Rimborso completo (100%) se disdici almeno 24 ore prima del check-in. '
-            'Nessun rimborso nelle ultime 24 ore.'
+            'Rimborso completo (100%) se disdici almeno 10 giorni prima del check-in. '
+            'Nessun rimborso entro 10 giorni dal check-in.'
         )
-        deadline_dt = check_in_dt - timedelta(hours=24) if check_in_dt else None
-        deadline_label = 'Disdetta gratuita entro le ore 00:00 del'
-
-    elif policy == 'moderate':
-        description = (
-            'Rimborso completo (100%) se disdici almeno 7 giorni prima del check-in. '
-            'Rimborso del 50% da 1 a 7 giorni prima. '
-            'Nessun rimborso nelle ultime 24 ore.'
-        )
-        deadline_dt = check_in_dt - timedelta(days=7) if check_in_dt else None
+        deadline_dt = check_in_dt - timedelta(days=10) if check_in_dt else None
         deadline_label = 'Disdetta gratuita entro'
-
-    else:  # strict
+    else:
+        label = 'Non Rimborsabile'
         description = (
-            'Rimborso completo (100%) solo se disdici entro 48 ore dalla prenotazione '
-            'E almeno 14 giorni prima del check-in. '
-            'Rimborso del 50% fino a 7 giorni prima del check-in. '
-            'Nessun rimborso oltre.'
+            'Nessun rimborso in caso di cancellazione o mancata presentazione. '
+            'La tariffa non rimborsabile non è modificabile dopo la conferma.'
         )
-        # Per la "strict" il termine più favorevole al cliente è 14gg prima del check-in
-        deadline_dt = check_in_dt - timedelta(days=14) if check_in_dt else None
-        deadline_label = 'Disdetta gratuita entro'
-
+        deadline_dt = None
+        deadline_label = ''
+    
     if deadline_dt:
         deadline_str = deadline_dt.strftime('%d/%m/%Y')
         deadline_text = f'{deadline_label} il <strong>{deadline_str}</strong>'
     else:
         deadline_text = ''
-
+    
     return {
-        'policy':      policy,
-        'label':       label,
+        'policy': 'refundable' if is_refundable else 'non_refundable',
+        'label': label,
         'description': description,
         'deadline_text': deadline_text,
     }
@@ -115,7 +84,7 @@ def email_booking_confirmation_html(booking: dict, settings: dict) -> str:
     if balance > 0:
         balance_row = f"<tr><td style='padding:8px 0;color:#5C6A79'>Saldo da versare</td><td style='padding:8px 0;text-align:right'>€{balance}</td></tr>"
 
-    # Recupera testo politica e data limite calcolata dinamicamente
+    # Recupera testo politica basato su is_refundable
     pol = _cancellation_policy_info(booking, settings)
 
     cancellation_block = f"""
@@ -149,7 +118,7 @@ def email_booking_confirmation_html(booking: dict, settings: dict) -> str:
 
 
 def email_modification_confirmation_html(booking: dict, settings: dict) -> str:
-    """Email di modifica prenotazione — stessa grafica esatta della conferma."""
+    """Email di modifica prenotazione — simile alla conferma."""
     villa = settings.get('villa_name', 'Light Blue')
     choice = booking.get('payment_choice')
     paid = booking.get('total_price') if choice == 'full' else booking.get('deposit_amount')
@@ -172,9 +141,9 @@ def email_modification_confirmation_html(booking: dict, settings: dict) -> str:
 
     return f"""
     <div style="font-family:Manrope,Arial,sans-serif;max-width:560px;margin:0 auto;padding:32px;background:#FAF9F6;color:#2A333C">
-      <h1 style="font-family:'Outfit',sans-serif;font-weight:300;font-size:28px;letter-spacing:-0.5px">Prenotazione modificata</h1>
+      <h1 style="font-family:'Outfit',sans-serif;font-weight:300;font-size:28px;letter-spacing:-0.5px">Modifica prenotazione</h1>
       <p>Ciao {booking.get('guest_name')},</p>
-      <p>ti confermiamo che i dettagli della tua prenotazione presso <strong>{villa}</strong> sono stati aggiornati.</p>
+      <p>la tua prenotazione presso <strong>{villa}</strong> è stata modificata.</p>
       <table style="width:100%;border-collapse:collapse;margin:24px 0">
         <tr><td style="padding:8px 0;color:#5C6A79">Check-in</td><td style="padding:8px 0;text-align:right"><strong>{_it_date(booking.get('check_in'))}</strong></td></tr>
         <tr><td style="padding:8px 0;color:#5C6A79">Check-out</td><td style="padding:8px 0;text-align:right"><strong>{_it_date(booking.get('check_out'))}</strong></td></tr>
