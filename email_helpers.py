@@ -45,7 +45,7 @@ def _cancellation_policy_info(booking: dict, settings: dict) -> dict:
     else:
         label = 'Non Rimborsabile'
         description = (
-            'Nessun rimborso in caso di cancellazione o mancata presentazione. '
+            'Nessun rimborso in caso di cancellazione. '
             'La tariffa non rimborsabile non è modificabile dopo la conferma.'
         )
         deadline_dt = None
