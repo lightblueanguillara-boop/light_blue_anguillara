@@ -28,7 +28,7 @@ class Booking(BaseModel):
     total_price: float
     deposit_amount: float
     payment_choice: Literal['deposit', 'full'] = 'deposit'
-    cancellation_policy: Literal['flexible', 'moderate', 'strict'] = 'moderate'
+    is_refundable: bool = True
     status: Literal['pending', 'confirmed', 'cancelled', 'external'] = 'pending'
     payment_status: Literal['unpaid', 'deposit_paid', 'fully_paid', 'refunded'] = 'unpaid'
     source: Literal['website', 'airbnb', 'booking', 'manual'] = 'website'
@@ -48,6 +48,7 @@ class BookingCreate(BaseModel):
     adults: int = 2
     children: int = 0
     payment_choice: Literal['deposit', 'full'] = 'deposit'
+    is_refundable: bool = True
     notes: Optional[str] = None
     consent_newsletter: bool = False
     origin_url: str
@@ -59,6 +60,7 @@ class BookingUpdate(BaseModel):
     guest_email: Optional[EmailStr] = None
     check_in: Optional[str] = None
     check_out: Optional[str] = None
+    is_refundable: Optional[bool] = None
 
     @field_validator('check_in', 'check_out')
     @classmethod
@@ -110,7 +112,7 @@ class VillaSettings(BaseModel):
     id: str = 'global'
     default_price_per_night: float = 120.0
     deposit_percent: float = 30.0
-    default_cancellation_policy: Literal['flexible', 'moderate', 'strict'] = 'moderate'
+    non_refundable_discount_percent: float = 5.0
     ical_airbnb_url: str = ''
     ical_booking_url: str = ''
     villa_name: str = 'Light Blue - Anguillara Sabazia'
@@ -131,7 +133,7 @@ class VillaSettings(BaseModel):
 class SettingsUpdate(BaseModel):
     default_price_per_night: Optional[float] = None
     deposit_percent: Optional[float] = None
-    default_cancellation_policy: Optional[Literal['flexible', 'moderate', 'strict']] = None
+    non_refundable_discount_percent: Optional[float] = None
     ical_airbnb_url: Optional[str] = None
     ical_booking_url: Optional[str] = None
     villa_name: Optional[str] = None
