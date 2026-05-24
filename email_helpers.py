@@ -77,12 +77,6 @@ async def send_email_async(to_email: str, subject: str, html: str) -> bool:
 
 def email_booking_confirmation_html(booking: dict, settings: dict) -> str:
     villa = settings.get('villa_name', 'Light Blue')
-    choice = booking.get('payment_choice')
-    paid = booking.get('total_price') if choice == 'full' else booking.get('deposit_amount')
-    balance = 0 if choice == 'full' else round(booking.get('total_price', 0) - booking.get('deposit_amount', 0), 2)
-    balance_row = ''
-    if balance > 0:
-        balance_row = f"<tr><td style='padding:8px 0;color:#5C6A79'>Saldo da versare</td><td style='padding:8px 0;text-align:right'>€{balance}</td></tr>"
 
     # Recupera testo politica basato su is_refundable
     pol = _cancellation_policy_info(booking, settings)
@@ -106,9 +100,7 @@ def email_booking_confirmation_html(booking: dict, settings: dict) -> str:
         <tr><td style="padding:8px 0;color:#5C6A79">Check-in</td><td style="padding:8px 0;text-align:right"><strong>{_it_date(booking.get('check_in'))}</strong></td></tr>
         <tr><td style="padding:8px 0;color:#5C6A79">Check-out</td><td style="padding:8px 0;text-align:right"><strong>{_it_date(booking.get('check_out'))}</strong></td></tr>
         <tr><td style="padding:8px 0;color:#5C6A79">Ospiti</td><td style="padding:8px 0;text-align:right">{booking.get('adults')} adulti, {booking.get('children')} bambini</td></tr>
-        <tr><td style="padding:8px 0;color:#5C6A79">Totale soggiorno</td><td style="padding:8px 0;text-align:right">€{booking.get('total_price')}</td></tr>
-        <tr style="border-top:1px solid #E5E0D8"><td style="padding:12px 0;color:#5C6A79">Pagato ora</td><td style="padding:12px 0;text-align:right;color:#7A93AC"><strong>€{paid}</strong></td></tr>
-        {balance_row}
+        <tr style="border-top:1px solid #E5E0D8"><td style="padding:12px 0;color:#2A333C;font-weight:bold">Totale complessivo</td><td style="padding:12px 0;text-align:right;color:#2A333C;font-size:16px"><strong>€{booking.get('total_price')}</strong></td></tr>
         {cancellation_block}
       </table>
       <p>A presto,<br/>{villa}</p>
@@ -120,12 +112,6 @@ def email_booking_confirmation_html(booking: dict, settings: dict) -> str:
 def email_modification_confirmation_html(booking: dict, settings: dict) -> str:
     """Email di modifica prenotazione — simile alla conferma."""
     villa = settings.get('villa_name', 'Light Blue')
-    choice = booking.get('payment_choice')
-    paid = booking.get('total_price') if choice == 'full' else booking.get('deposit_amount')
-    balance = 0 if choice == 'full' else round(booking.get('total_price', 0) - booking.get('deposit_amount', 0), 2)
-    balance_row = ''
-    if balance > 0:
-        balance_row = f"<tr><td style='padding:8px 0;color:#5C6A79'>Saldo da versare</td><td style='padding:8px 0;text-align:right'>€{balance}</td></tr>"
 
     pol = _cancellation_policy_info(booking, settings)
 
@@ -148,9 +134,7 @@ def email_modification_confirmation_html(booking: dict, settings: dict) -> str:
         <tr><td style="padding:8px 0;color:#5C6A79">Check-in</td><td style="padding:8px 0;text-align:right"><strong>{_it_date(booking.get('check_in'))}</strong></td></tr>
         <tr><td style="padding:8px 0;color:#5C6A79">Check-out</td><td style="padding:8px 0;text-align:right"><strong>{_it_date(booking.get('check_out'))}</strong></td></tr>
         <tr><td style="padding:8px 0;color:#5C6A79">Ospiti</td><td style="padding:8px 0;text-align:right">{booking.get('adults')} adulti, {booking.get('children')} bambini</td></tr>
-        <tr><td style="padding:8px 0;color:#5C6A79">Totale soggiorno</td><td style="padding:8px 0;text-align:right">€{booking.get('total_price')}</td></tr>
-        <tr style="border-top:1px solid #E5E0D8"><td style="padding:12px 0;color:#5C6A79">Pagato</td><td style="padding:12px 0;text-align:right;color:#7A93AC"><strong>€{paid}</strong></td></tr>
-        {balance_row}
+        <tr style="border-top:1px solid #E5E0D8"><td style="padding:12px 0;color:#2A333C;font-weight:bold">Totale complessivo</td><td style="padding:12px 0;text-align:right;color:#2A333C;font-size:16px"><strong>€{booking.get('total_price')}</strong></td></tr>
         {cancellation_block}
       </table>
       <p>A presto,<br/>{villa}</p>
