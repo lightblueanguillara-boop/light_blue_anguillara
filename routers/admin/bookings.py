@@ -40,86 +40,205 @@ async def create_manual_booking(payload: dict, admin=Depends(get_current_admin))
         adults = int(payload.get('adults', 2))
         children = int(payload.get('children', 0))
 
-        # ESTRAZIONE DEL NUOVO CAMPO IS_REFUNDABLE DALLE IMPOSTAZIONI MANUALI
+        # Allineamento con la gestione politiche rimborsabili delle email
         is_refundable = bool(payload.get('is_refundable', True))
+
+        guest_email = payload.get('guest_email', '').strip()
+        placeholder_email = not guest_email or guest_email == ""
+
+        if placeholder_email:
+            guest_email = "manual@booking.com"
+
+        check_in = payload.get('check_in')
+        check_out = payload.get('check_out')
+
+        if not check_in or not check_out:
+            raise HTTPException(400, "Date check-in e check-out mancanti")
+
+        # Controllo sovrapposizione date per nuove prenotazioni manuali
+        existing_overlap = await db.bookings.find_one({
+            "status": {"$ne": "cancelled"},
+            "check_in": {"$lt": check_out},
+            "check_out": {"$gt": check_in}
+        })
+        if existing_overlap:
+            raise HTTPException(
+                400,
+                f"Le date richieste si sovrappongono con la prenotazione di {existing_overlap.get('guest_name')} ({_it_date(existing_overlap.get('check_in'))} → {_it_date(existing_overlap.get('check_out'))})"
+            )
 
         settings = await get_settings()
 
-        # Se l'acconto non è esplicitamente calcolato, usa la percentuale dei settings
-        if deposit_amount <= 0:
-            dep_pct = float(settings.get('deposit_percent', 30.0))
-            deposit_amount = round((total_price * dep_pct) / 100.0, 2)
-
-        new_booking = {
-            "id": f"bk_{uuid.uuid4().hex[:12]}",
-            "guest_name": payload.get('guest_name', 'Blocco Manuale'),
-            "guest_email": payload.get('guest_email', 'admin@lightblue.it'),
-            "guest_phone": payload.get('guest_phone'),
-            "check_in": payload.get('check_in'),
-            "check_out": payload.get('check_out'),
+        booking_data = {
+            "id": payload.get('id') or f"bk_{uuid.uuid4().hex[:12]}",
+            "guest_name": payload.get('guest_name', 'Ospite Manuale'),
+            "guest_email": guest_email,
+            "guest_phone": payload.get('guest_phone', ''),
+            "check_in": check_in,
+            "check_out": check_out,
             "adults": adults,
             "children": children,
             "total_price": total_price,
             "deposit_amount": deposit_amount,
-            "payment_choice": "deposit",
-            "is_refundable": is_refundable,  # Salva la scelta impostata manualmente dall'admin
-            "status": "confirmed",
-            "payment_status": "unpaid",
-            "source": payload.get('source', 'manual'),
+            "payment_choice": payload.get('payment_choice', 'full'),
+            "is_refundable": is_refundable,
+            "status": 'confirmed',
+            "payment_status": payload.get('payment_status', 'unpaid'),
+            "source": 'manual',
             "notes": payload.get('notes', ''),
             "consent_newsletter": False,
             "created_at": datetime.now(timezone.utc).isoformat()
         }
 
-        await db.bookings.insert_one(new_booking)
+        await db.bookings.insert_one(booking_data)
 
-        # Rimuove l'identificatore MongoDB interno per la risposta ed evitare conflitti
-        if '_id' in new_booking:
-            del new_booking['_id']
+        if "_id" in booking_data:
+            del booking_data["_id"]
 
-        # Invio asincrono dell'email di conferma allineato alla scelta rimborsabile/non rimborsabile
-        asyncio.create_task(
-            send_email_async(
-                new_booking['guest_email'],
-                f"Conferma Prenotazione — {settings.get('villa_name','Light Blue')}",
-                email_booking_confirmation_html(new_booking, settings)
-            )
-        )
+        if not placeholder_email:
+            asyncio.create_task(send_email_async(
+                guest_email,
+                f"Prenotazione confermata — {settings.get('villa_name', 'Light Blue')}",
+                email_booking_confirmation_html(booking_data, settings),
+            ))
+            logging.info(f"Email di conferma inviata per prenotazione manuale {booking_data['id']} a {guest_email}")
+        else:
+            logging.info(f"Prenotazione manuale {booking_data['id']} creata con email placeholder — nessuna conferma inviata.")
 
-        return new_booking
+        return {
+            "ok": True,
+            "message": "Prenotazione creata con successo",
+            "booking": booking_data,
+            "email_sent": not placeholder_email,
+        }
 
+    except HTTPException:
+        raise
     except Exception as e:
-        logging.exception("Error creating manual booking")
-        raise HTTPException(status_code=400, detail=f"Errore creazione prenotazione: {str(e)}")
+        logging.error(f"Errore creazione manuale: {e}")
+        raise HTTPException(500, f"Errore durante il salvataggio: {str(e)}")
 
-@router.post("/admin/bookings/{booking_id}/cancel")
-async def admin_cancel_booking(booking_id: str, admin=Depends(get_current_admin)):
-    """Cancella una prenotazione lato amministratore calcolando il rimborso esatto."""
+@router.patch("/admin/bookings/{booking_id}")
+async def update_booking(booking_id: str, updates: BookingUpdate, admin=Depends(get_current_admin)):
+    decoded_id = urllib.parse.unquote(booking_id)
+    patch = updates.model_dump(exclude_unset=True)
+
+    if not patch:
+        raise HTTPException(400, 'No fields to update')
+
+    current_b = await db.bookings.find_one({'id': decoded_id})
+    if not current_b and decoded_id != booking_id:
+        current_b = await db.bookings.find_one({'id': booking_id})
+
+    if current_b:
+        new_check_in = patch.get('check_in', current_b.get('check_in'))
+        new_check_out = patch.get('check_out', current_b.get('check_out'))
+        new_status = patch.get('status', current_b.get('status'))
+        
+        if new_status != 'cancelled' and new_check_in and new_check_out:
+            existing_overlap = await db.bookings.find_one({
+                "id": {"$ne": current_b['id']},
+                "status": {"$ne": "cancelled"},
+                "check_in": {"$lt": new_check_out},
+                "check_out": {"$gt": new_check_in}
+            })
+            if existing_overlap:
+                raise HTTPException(
+                    400,
+                    f"Le date modificate si sovrappongono con la prenotazione di {existing_overlap.get('guest_name')} ({_it_date(existing_overlap.get('check_in'))} → {_it_date(existing_overlap.get('check_out'))})"
+                )
+
+    result = await db.bookings.update_one({'id': decoded_id}, {'$set': patch})
+    if result.matched_count == 0 and decoded_id != booking_id:
+        await db.bookings.update_one({'id': booking_id}, {'$set': patch})
+
+    updated_booking = await db.bookings.find_one({'id': decoded_id}, {'_id': 0})
+    if not updated_booking and decoded_id != booking_id:
+        updated_booking = await db.bookings.find_one({'id': booking_id}, {'_id': 0})
+
+    if updated_booking and updated_booking.get('status') != 'cancelled':
+        guest_email = updated_booking.get('guest_email', '').strip()
+        is_placeholder = not guest_email or guest_email in ('', 'manual@booking.com')
+        if not is_placeholder:
+            settings = await get_settings()
+            asyncio.create_task(send_email_async(
+                guest_email,
+                f"Modifica prenotazione — {settings.get('villa_name', 'Light Blue')}",
+                email_modification_confirmation_html(updated_booking, settings),
+            ))
+
+    return updated_booking
+
+@router.delete("/admin/bookings/{booking_id}")
+async def delete_booking(booking_id: str, admin=Depends(get_current_admin)):
+    """Archivia/Cancella una prenotazione dal pannello admin."""
     decoded_id = urllib.parse.unquote(booking_id)
 
-    b = await db.bookings.find_one({'id': decoded_id})
+    b = await db.bookings.find_one({'id': decoded_id}, {'_id': 0})
     if not b:
         raise HTTPException(404, 'Booking not found')
 
-    if b.get('status') == 'cancelled':
-        return {'ok': True, 'refund_amount': b.get('refund_amount', 0.0), 'msg': 'Already cancelled'}
+    settings = await get_settings()
 
-    # Calcolo dinamico del rimborso basato sulla regola dei 10 giorni o Tariffa Non Rimborsabile
-    ref_res = compute_refund_amount(b)
-    refund_amount = ref_res.get('refund', 0.0)
+    await db.bookings.update_one(
+        {'id': decoded_id},
+        {'$set': {
+            'status': 'cancelled',
+            'cancelled_at': datetime.now(timezone.utc).isoformat(),
+        }},
+    )
 
-    # Se c'era un pagamento Stripe registrato ed è previsto un rimborso monetario, procedi via API Stripe
-    pi = b.get('payment_intent_id')
-    if pi and refund_amount > 0:
+    guest_email = b.get('guest_email', '').strip()
+    is_placeholder = not guest_email or guest_email in ('', 'manual@booking.com')
+
+    # Se la prenotazione manuale non è pagata (unpaid) ma l'email è reale, 
+    # permettiamo l'invio della notifica di cancellazione cortesia all'ospite.
+    should_send_email = b.get('status') == 'confirmed'
+
+    if not is_placeholder and should_send_email:
+        asyncio.create_task(send_email_async(
+            guest_email,
+            f"Prenotazione cancellata — {settings.get('villa_name', 'Light Blue')}",
+            email_cancellation_html(b, settings),
+        ))
+        logging.info(f"Email di cancellazione inviata per prenotazione {decoded_id} a {guest_email}")
+    else:
+        logging.info(f"Prenotazione {decoded_id} archiviata. Nessuna email inviata (Email valida: {not is_placeholder}, Stato valido: {should_send_email})")
+
+    return {
+        'ok': True,
+        'archived': True,
+        'email_sent': (not is_placeholder and should_send_email)
+    }
+
+@router.post("/admin/bookings/{booking_id}/cancel-refund")
+async def cancel_and_refund(booking_id: str, payload: RefundRequest, admin=Depends(get_current_admin)):
+    decoded_id = urllib.parse.unquote(booking_id)
+
+    b = await db.bookings.find_one({'id': decoded_id}, {'_id': 0})
+    if not b:
+        raise HTTPException(404, 'Booking not found')
+
+    policy_calc = compute_refund_amount(b)
+    refund_amount = float(payload.amount) if payload.amount is not None else policy_calc['refund']
+
+    if refund_amount > 0:
+        tx = await db.payment_transactions.find_one({'booking_id': decoded_id, 'payment_status': 'paid'}, {'_id': 0})
+        pi = (tx or {}).get('payment_intent_id') or b.get('payment_intent_id')
+
+        if not pi:
+            raise HTTPException(400, 'Payment intent non disponibile per il rimborso Stripe')
+
         try:
-            stripe.Refund.create(
+            await asyncio.to_thread(
+                stripe.Refund.create,
                 payment_intent=pi,
-                amount=int(refund_amount * 100),
+                amount=int(round(refund_amount * 100)),
                 reason='requested_by_customer',
             )
         except Exception as e:
             logging.exception('Stripe refund failed')
-            raise HTTPException(500, f'Rimborso Stripe fallito ma registrato localmente: {e}')
+            raise HTTPException(500, f'Rimborso fallito: {e}')
 
     await db.bookings.update_one(
         {'id': decoded_id},
@@ -129,18 +248,6 @@ async def admin_cancel_booking(booking_id: str, admin=Depends(get_current_admin)
             'refund_amount': refund_amount,
             'refund_at': datetime.now(timezone.utc).isoformat(),
         }},
-    )
-
-    # Invia email di notifica cancellazione all'ospite
-    settings = await get_settings()
-    b['status'] = 'cancelled'
-    b['refund_amount'] = refund_amount
-    asyncio.create_task(
-        send_email_async(
-            b['guest_email'],
-            f"Annullamento Prenotazione — {settings.get('villa_name','Light Blue')}",
-            email_cancellation_html(b, settings)
-        )
     )
 
     return {'ok': True, 'refund_amount': refund_amount}
@@ -163,24 +270,7 @@ async def balance_reminder(booking_id: str, admin=Depends(get_current_admin)):
 
     await db.bookings.update_one(
         {'id': decoded_id},
-        {'$set': {'last_reminder_at': datetime.now(timezone.utc).isoformat()}}
+        {'$set': {'last_reminder_at': datetime.now(timezone.utc).isoformat()}},
     )
+
     return {'ok': ok}
-
-@router.delete("/admin/bookings/{booking_id}")
-async def admin_delete_booking_permanently(booking_id: str, admin=Depends(get_current_admin)):
-    """
-    Rimuove definitivamente una prenotazione dal database (Hard Delete).
-    Risolve il problema del 404 Not Found quando si preme sul cestino dal pannello admin.
-    """
-    decoded_id = urllib.parse.unquote(booking_id)
-
-    # Verifica se la prenotazione esiste
-    b = await db.bookings.find_one({'id': decoded_id})
-    if not b:
-        raise HTTPException(status_code=404, detail="Prenotazione non trovata")
-
-    # Eliminazione fisica e permanente della risorsa dal database
-    await db.bookings.delete_one({'id': decoded_id})
-
-    return {"ok": True, "message": "Prenotazione eliminata definitivamente"}
