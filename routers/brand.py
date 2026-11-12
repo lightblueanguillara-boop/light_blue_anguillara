@@ -8,6 +8,16 @@ from auth import get_current_admin
 router = APIRouter()
 
 
+@router.get("/brand/splash-{w}x{h}.png")
+async def splash_image(w: int, h: int, v: str = ''):
+    """Schermata di avvio per iPhone/iPad: logo su fondo blu acqua."""
+    if (w, h) not in brand.SPLASH_SIZES:
+        raise HTTPException(404, 'Misura non disponibile')
+    data, version = await brand.get_splash(w, h)
+    cache = 'public, max-age=31536000, immutable' if v and v == version else 'public, max-age=3600'
+    return Response(content=data, media_type='image/png', headers={'Cache-Control': cache})
+
+
 @router.get("/brand/{name}")
 async def brand_file(name: str, v: str = ''):
     if name not in brand.PUBLIC_FILES:

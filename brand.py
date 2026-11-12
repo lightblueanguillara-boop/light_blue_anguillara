@@ -10,7 +10,7 @@ import io
 from datetime import datetime, timezone
 from pathlib import Path
 
-from PIL import Image, ImageOps
+from PIL import Image, ImageDraw, ImageOps
 
 from db import db
 
@@ -21,6 +21,17 @@ MAX_UPLOAD_BYTES = 8 * 1024 * 1024
 ALLOWED_FORMATS = {'PNG', 'JPEG', 'WEBP'}       # niente SVG: può contenere codice
 Image.MAX_IMAGE_PIXELS = 40_000_000              # protezione da immagini "bomba"
 MIN_SIZE = {'logo': (256, 256), 'share': (600, 315)}
+
+# Colore di sfondo della schermata d'ingresso dell'app ("blu acqua"): uguale nel frontend
+APP_BG_COLOR = (47, 164, 199)   # #2FA4C7
+
+# Schermate di avvio per iPhone/iPad (pixel, verticale): l'iPhone non le genera da solo
+SPLASH_SIZES = {
+    (640, 1136), (750, 1334), (828, 1792), (1125, 2436), (1170, 2532), (1179, 2556), (1206, 2622),
+    (1242, 2208), (1242, 2688), (1284, 2778), (1290, 2796), (1320, 2868),
+    (1488, 2266), (1536, 2048), (1640, 2360), (1668, 2224), (1668, 2388), (2048, 2732),
+}
+_splash_cache: dict = {}
 
 # nome pubblico del file -> (tipo, funzione che lo genera)
 LOGO_PNG_SIZES = {'logo-32.png': 32, 'logo-180.png': 180, 'logo-192.png': 192, 'logo-256.png': 256, 'logo-512.png': 512}
@@ -93,6 +104,29 @@ def render_share(data: bytes) -> dict:
     out = io.BytesIO()
     img.save(out, 'JPEG', quality=85, optimize=True, progressive=True)  # niente dati EXIF
     return {'share.jpg': out.getvalue()}
+
+
+def render_splash(logo_png: bytes, w: int, h: int) -> bytes:
+    """Logo rotondo centrato su fondo blu acqua (stessa posizione della schermata animata)."""
+    bg = Image.new('RGB', (w, h), APP_BG_COLOR)
+    side = int(min(w, h) * 0.30)
+    logo = Image.open(io.BytesIO(logo_png)).convert('RGBA').resize((side, side), Image.LANCZOS)
+    mask = Image.new('L', (side, side), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, side - 1, side - 1), fill=255)
+    bg.paste(logo, ((w - side) // 2, (h - side) // 2), mask)
+    out = io.BytesIO()
+    bg.save(out, 'PNG', optimize=True)
+    return out.getvalue()
+
+
+async def get_splash(w: int, h: int):
+    logo512, version = await get_file('logo-512.png')
+    key = (version, w, h)
+    if key not in _splash_cache:
+        if len(_splash_cache) > 60:
+            _splash_cache.clear()
+        _splash_cache[key] = await asyncio.to_thread(render_splash, logo512, w, h)
+    return _splash_cache[key], version
 
 
 RENDERERS = {'logo': render_logo, 'share': render_share}

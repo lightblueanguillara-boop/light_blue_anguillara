@@ -98,3 +98,20 @@ def test_brand_admin_requires_auth(client, method, path):
 def test_brand_versions_not_editable_from_settings(client, auth):
     client.put('/api/admin/settings', headers=auth, json={'logo_version': 'hack', 'villa_name': 'Light Blue'})
     assert client.get('/api/villa/info').json()['logo_version'] != 'hack'
+
+
+def test_splash_images(client):
+    import brand
+    r = client.get('/api/brand/splash-1179x2556.png')
+    assert r.status_code == 200 and r.headers['content-type'] == 'image/png'
+    img = Image.open(io.BytesIO(r.content)).convert('RGB')
+    assert img.size == (1179, 2556)
+    assert img.getpixel((10, 10)) == brand.APP_BG_COLOR            # niente sfondo bianco o nero
+    assert img.getpixel((589, 1278)) != brand.APP_BG_COLOR         # logo al centro
+    assert client.get('/api/brand/splash-100x100.png').status_code == 404
+
+
+def test_splash_follows_logo(client, auth):
+    before = client.get('/api/brand/splash-750x1334.png').content
+    client.post('/api/admin/brand/logo', headers=auth, files={'file': ('l.png', _img(), 'image/png')})
+    assert client.get('/api/brand/splash-750x1334.png').content != before
