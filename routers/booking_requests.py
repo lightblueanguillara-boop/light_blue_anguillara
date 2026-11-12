@@ -26,6 +26,7 @@ from email_helpers import (
 )
 from models import Booking, BookingRequestCreate, RejectRequest, Subscriber
 from pricing import BLOCKING_STATUSES, compute_dual_pricing, dates_available
+from notifications import notify
 from ratelimit import rate_limit
 
 router = APIRouter()
@@ -36,7 +37,8 @@ def _now() -> datetime:
 
 
 async def _notify_guest(booking: dict, subject: str, html_body: str):
-    asyncio.create_task(send_email_async(booking['guest_email'], subject, html_body))
+    asyncio.create_task(send_email_async(booking['guest_email'], subject, html_body,
+                                         ref_url=f"/admin/bookings?open={booking['id']}"))
 
 
 # --- PUBBLICO -----------------------------------------------------------------
@@ -103,6 +105,7 @@ async def create_booking_request(payload: BookingRequestCreate, request: Request
             f"[Light Blue] Nuova richiesta di prenotazione da {booking.guest_name[:60]}",
             email_request_admin_html(b, settings, f"{FRONTEND_URL}/admin/bookings"),
         ))
+    asyncio.create_task(notify('new_request', booking=b))
     return {'ok': True, 'booking_id': booking.id, 'request_expires_at': booking.request_expires_at,
             'total_price': total, 'hold_hours': hold_hours}
 
@@ -198,6 +201,7 @@ async def expire_awaiting_payment(booking_id: str):
         settings = await get_settings()
         await _notify_guest(b, f"Richiesta scaduta — {settings.get('villa_name', 'Light Blue')}",
                             email_request_expired_html(b, settings, unpaid=True))
+        await notify('payment_expired', booking=b)
 
 
 async def expire_requests():
@@ -219,6 +223,7 @@ async def expire_requests():
             await _notify_guest(b, f"Richiesta scaduta — {settings.get('villa_name', 'Light Blue')}",
                                 email_request_expired_html(b, settings, unpaid=False))
             logging.info(f"Richiesta {b['id']} scaduta senza risposta")
+            await notify('request_expired', booking=b)
 
     # 2) richieste accettate ma non pagate entro la scadenza
     for b in await db.bookings.find(

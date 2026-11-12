@@ -28,6 +28,11 @@ FRONTEND_URL = os.environ.get('FRONTEND_URL', 'https://www.lightblueanguillara.c
 # URL pubblico del backend (per il logo nelle email)
 PUBLIC_API_URL = os.environ.get('PUBLIC_API_URL', 'https://api.lightblueanguillara.com').rstrip('/')
 
+# Notifiche push (Web Push / VAPID). Genera le chiavi con:  python scripts/gen_vapid_keys.py
+VAPID_PUBLIC_KEY = os.environ.get('VAPID_PUBLIC_KEY', '')
+VAPID_PRIVATE_KEY = os.environ.get('VAPID_PRIVATE_KEY', '')
+VAPID_SUBJECT = os.environ.get('VAPID_SUBJECT', 'mailto:info@lightblueanguillara.com')
+
 # Cloudinary (gestione della Galleria immagini)
 CLOUDINARY_CLOUD_NAME = os.environ.get('CLOUDINARY_CLOUD_NAME', '')
 CLOUDINARY_API_KEY = os.environ.get('CLOUDINARY_API_KEY', '')

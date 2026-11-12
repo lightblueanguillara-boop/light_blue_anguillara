@@ -17,6 +17,8 @@ os.environ['ADMIN_SEED_PASSWORD'] = 'password-di-test-123'
 os.environ['ADMIN_NOTIFY_EMAIL'] = 'notify@example.com'
 os.environ['FRONTEND_URL'] = 'https://www.example-site.test'
 os.environ['CORS_ORIGINS'] = 'http://localhost:3000'
+os.environ['VAPID_PUBLIC_KEY'] = 'BNTVEulb2GJQaH9rHzQis1f06XGhFhrio16Wk0N-yav_btFh7zINzzV6LRlZbRQN1obsGcU49bQhbBROgGIvrbg'   # chiavi di prova
+os.environ['VAPID_PRIVATE_KEY'] = 'eak59gFFDXSUwiwH7eOSUXNF4oiFeaGNM1lu1SSV7ZA'
 
 # Protezione: mai eseguire i test su un database che non sia locale e di test.
 _url, _name = os.environ['MONGO_URL'], os.environ['DB_NAME']
@@ -110,11 +112,12 @@ def client(app_client, mongo, fake_stripe, sent_emails):
     import ratelimit
     ratelimit.reset_all()
     for col in ('bookings', 'payment_transactions', 'contact_messages', 'subscribers',
-                'unsubscribed', 'marketing_logs', 'gallery', 'price_overrides'):
+                'unsubscribed', 'marketing_logs', 'gallery', 'price_overrides',
+                'push_subscriptions', 'push_outbox'):
         mongo[col].delete_many({})
     mongo.settings.delete_many({})
     mongo.brand_assets.delete_many({})
-    mongo.admins.update_many({}, {'$set': {'token_version': 0}})
+    mongo.admins.update_many({}, {'$set': {'token_version': 0}, '$unset': {'known_devices': ''}})
     return app_client
 
 
@@ -129,3 +132,16 @@ def auth(client):
 def instant(client, mongo):
     """Imposta la modalità di prenotazione immediata (pagamento subito)."""
     mongo.settings.update_one({'id': 'global'}, {'$set': {'booking_mode': 'instant'}}, upsert=True)
+
+
+@pytest.fixture()
+def pushes(client, mongo, monkeypatch):
+    """Telefono finto iscritto alle notifiche: raccoglie i messaggi invece di inviarli."""
+    import json as _json
+    import notifications
+    box = []
+    monkeypatch.setattr(notifications, '_send_one', lambda sub, payload: box.append(_json.loads(payload)))
+    monkeypatch.setattr(notifications, '_in_quiet_hours', lambda settings, now: False)
+    mongo.push_subscriptions.insert_one({'id': 'phone1', 'endpoint': 'https://fcm.googleapis.com/fcm/send/abc',
+                                         'keys': {'p256dh': 'x', 'auth': 'y'}, 'label': 'iPhone, Safari'})
+    return box

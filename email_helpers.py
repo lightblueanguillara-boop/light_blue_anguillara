@@ -97,7 +97,8 @@ def _cancellation_policy_info(booking: dict, settings: dict) -> dict:
     }
 
 
-async def send_email_async(to_email: str, subject: str, html_body: str, headers: Optional[dict] = None) -> bool:
+async def send_email_async(to_email: str, subject: str, html_body: str, headers: Optional[dict] = None,
+                           ref_url: Optional[str] = None) -> bool:
     try:
         params = {'from': SENDER_EMAIL, 'to': [to_email], 'subject': subject, 'html': html_body}
         if headers:
@@ -106,6 +107,10 @@ async def send_email_async(to_email: str, subject: str, html_body: str, headers:
         return True
     except Exception as e:
         logging.warning(f"Email send failed to {to_email}: {e}")
+        from db import ADMIN_NOTIFY_EMAIL
+        if to_email and to_email.lower() != (ADMIN_NOTIFY_EMAIL or '').lower():
+            from notifications import notify   # import locale: evita import circolari
+            await notify('email_failed', to=to_email, subject=subject, url=ref_url, tag=f'{to_email}:{subject}')
         return False
 
 

@@ -2,12 +2,13 @@
 import asyncio
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import requests
 from icalendar import Calendar
 
 from db import db, get_settings
+from notifications import notify
 
 async def ical_sync_run():
     s = await get_settings()
@@ -19,6 +20,7 @@ async def ical_sync_run():
     new_external_ids = []
     synced_sources = []   # piattaforme scaricate con successo
     errors = []
+    inserted = []         # prenotazioni esterne comparse per la prima volta (per le notifiche)
 
     for src, url in urls:
         if not url:
@@ -58,7 +60,7 @@ async def ical_sync_run():
                         # LOGICA DI PROTEZIONE PREZZO:
                         # $set aggiorna solo i campi dinamici (date/stato)
                         # $setOnInsert scrive i campi statici SOLO alla creazione del record
-                        await db.bookings.update_one(
+                        res = await db.bookings.update_one(
                             {'id': booking_id}, 
                             {
                                 '$set': {
@@ -81,6 +83,8 @@ async def ical_sync_run():
                         )
                         
                         new_external_ids.append(booking_id)
+                        if res.upserted_id is not None:
+                            inserted.append(booking_id)
                         imported += 1
                         
                     except Exception as vevent_error:
@@ -97,12 +101,13 @@ async def ical_sync_run():
     # SOLO per le piattaforme scaricate correttamente. Se un download fallisce
     # (Airbnb/Booking irraggiungibili) le date restano bloccate: meglio una data
     # bloccata in più che una doppia prenotazione.
+    removed = []
     if synced_sources:
-        await db.bookings.delete_many({
-            'source': {'$in': synced_sources},
-            'status': 'external',
-            'id': {'$nin': new_external_ids}
-        })
+        stale_query = {'source': {'$in': synced_sources}, 'status': 'external', 'id': {'$nin': new_external_ids}}
+        removed = await db.bookings.find(stale_query, {'_id': 0}).to_list(500)
+        await db.bookings.delete_many(stale_query)
+
+    await _notify_changes(s, urls, synced_sources, inserted, removed)
 
     # Aggiornamento statistiche nel database
     await db.settings.update_one(
@@ -116,3 +121,45 @@ async def ical_sync_run():
     
     logging.info(f"Sincronizzazione iCal completata: {imported} eventi, errori: {errors or 'nessuno'}")
     return {'imported': imported, 'errors': errors, 'at': datetime.now(timezone.utc).isoformat()}
+
+
+MAX_NOTIFY_PER_SYNC = 5
+FAIL_NOTIFY_AFTER = timedelta(hours=1)
+
+
+async def _notify_changes(s: dict, urls, synced_sources, inserted_ids, removed) -> None:
+    """Notifiche 6, 7 e 8. La prima sincronizzazione di un calendario non genera avvisi
+    (altrimenti arriverebbe una notifica per ogni prenotazione già esistente)."""
+    today = date.today().isoformat()
+    initialized = set(s.get('ical_initialized') or [])
+    newly_initialized = [src for src in synced_sources if src not in initialized]
+
+    for src in synced_sources:
+        if src not in initialized:
+            continue
+        new_docs = await db.bookings.find({'id': {'$in': inserted_ids}, 'source': src, 'check_out': {'$gte': today}},
+                                          {'_id': 0}).sort('check_in', 1).to_list(MAX_NOTIFY_PER_SYNC)
+        for b in new_docs:
+            await notify('external_new', booking=b)
+        gone = sorted([b for b in removed if b.get('source') == src and b.get('check_out', '') >= today],
+                      key=lambda b: b['check_in'])[:MAX_NOTIFY_PER_SYNC]
+        for b in gone:
+            await notify('external_removed', booking=b)
+
+    # calendario illeggibile da almeno un'ora
+    fail = dict(s.get('ical_fail') or {})
+    now = datetime.now(timezone.utc)
+    for src, url in urls:
+        if not url or src in synced_sources:
+            fail.pop(src, None)
+            continue
+        state = fail.get(src) or {'since': now.isoformat(), 'notified': False}
+        if not state.get('notified') and now - datetime.fromisoformat(state['since']) >= FAIL_NOTIFY_AFTER:
+            await notify('ical_failing', source=src, tag=src)
+            state['notified'] = True
+        fail[src] = state
+
+    update = {'ical_fail': fail}
+    if newly_initialized:
+        update['ical_initialized'] = sorted(initialized | set(newly_initialized))
+    await db.settings.update_one({'id': 'global'}, {'$set': update})

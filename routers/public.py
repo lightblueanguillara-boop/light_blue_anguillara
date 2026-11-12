@@ -13,6 +13,7 @@ from db import db, get_settings, ADMIN_NOTIFY_EMAIL
 from email_helpers import send_email_async, email_admin_contact_notification_html, email_guest_contact_confirmation_html
 from models import ContactMessage, ContactCreate, Subscriber, GalleryImage, _validate_iso_date, validate_stay
 from pricing import BLOCKING_STATUSES, compute_dual_pricing, dates_available, daterange
+from notifications import notify
 from ratelimit import rate_limit, check_rate
 
 router = APIRouter()
@@ -121,6 +122,7 @@ async def contact(payload: ContactCreate, request: Request):
             f"[Light Blue] Nuova richiesta da {payload.name[:60]}",
             email_admin_contact_notification_html(msg.model_dump()),
         ))
+    asyncio.create_task(notify('new_message', message=msg.model_dump()))
     # Conferma automatica all'ospite
     asyncio.create_task(send_email_async(
         payload.email,

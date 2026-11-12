@@ -200,6 +200,16 @@ async def update_admin_settings(
     if not patch:
         raise HTTPException(400, 'No fields to update')
 
+    current = await get_settings()
+    changed = [src for src in ('airbnb', 'booking')
+               if f'ical_{src}_url' in patch and patch[f'ical_{src}_url'] != current.get(f'ical_{src}_url')]
+    if changed:
+        patch['ical_initialized'] = [x for x in (current.get('ical_initialized') or []) if x not in changed]
+        fail = dict(current.get('ical_fail') or {})
+        for src in changed:
+            fail.pop(src, None)
+        patch['ical_fail'] = fail
+
     await db.settings.update_one(
         {'id': 'global'},
         {'$set': patch},

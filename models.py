@@ -33,6 +33,21 @@ def validate_stay(check_in: str, check_out: str, allow_past: bool = False) -> No
 class AdminLogin(BaseModel):
     email: EmailStr
     password: str = Field(max_length=200)
+    device_id: Optional[str] = Field(default=None, max_length=64)   # per riconoscere i nuovi dispositivi
+    device_label: Optional[str] = Field(default=None, max_length=120)
+
+
+class PushSubscribe(BaseModel):
+    endpoint: str = Field(max_length=1000)
+    keys: dict
+    label: Optional[str] = Field(default=None, max_length=120)
+
+    @field_validator('keys')
+    @classmethod
+    def _keys(cls, v):
+        if not isinstance(v.get('p256dh'), str) or not isinstance(v.get('auth'), str) or len(v['p256dh']) > 200 or len(v['auth']) > 100:
+            raise ValueError('Chiavi di iscrizione non valide')
+        return {'p256dh': v['p256dh'], 'auth': v['auth']}
 
 
 class PasswordChange(BaseModel):
@@ -236,6 +251,12 @@ class VillaSettings(BaseModel):
     # Versioni di logo e immagine di anteprima (cambiano a ogni caricamento: servono per la cache)
     logo_version: str = 'default'
     share_version: str = 'default'
+    # Notifiche sul telefono
+    notify_groups: dict = Field(default_factory=lambda: {'A': True, 'B': True, 'C': True, 'D': True})
+    notify_detail: Literal['detailed', 'discreet'] = 'detailed'
+    notify_quiet_enabled: bool = True
+    notify_quiet_start: str = '23:00'
+    notify_quiet_end: str = '08:00'
     # Dati legali (Informativa privacy, Condizioni di prenotazione, footer)
     legal_owner_name: str = ''
     legal_owner_tax_id: str = ''
@@ -263,6 +284,11 @@ class SettingsUpdate(BaseModel):
     last_minute_title: Optional[str] = None
     last_minute_subtitle: Optional[str] = None
     booking_mode: Optional[Literal['instant', 'request']] = None
+    notify_groups: Optional[dict] = None
+    notify_detail: Optional[Literal['detailed', 'discreet']] = None
+    notify_quiet_enabled: Optional[bool] = None
+    notify_quiet_start: Optional[str] = Field(default=None, pattern=r'^([01]\d|2[0-3]):[0-5]\d$')
+    notify_quiet_end: Optional[str] = Field(default=None, pattern=r'^([01]\d|2[0-3]):[0-5]\d$')
     request_hold_hours: Optional[int] = Field(default=None, ge=1, le=168)
     payment_link_hours: Optional[int] = Field(default=None, ge=1, le=24)
     legal_owner_name: Optional[str] = Field(default=None, max_length=200)

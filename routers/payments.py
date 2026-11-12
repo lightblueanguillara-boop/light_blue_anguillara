@@ -12,6 +12,7 @@ from db import db, get_settings, STRIPE_API_KEY, STRIPE_WEBHOOK_SECRET, ADMIN_NO
 from email_helpers import send_email_async, email_booking_confirmation_html
 from models import Booking, BookingCreate, PaymentTransaction, Subscriber
 from pricing import BLOCKING_STATUSES, compute_dual_pricing, dates_available
+from notifications import notify
 from ratelimit import rate_limit
 
 router = APIRouter()
@@ -76,6 +77,7 @@ async def _mark_paid(session_id: str, payment_intent: Optional[str]):
     if r.matched_count == 0:
         # Non dovrebbe più succedere, ma se succede il gestore DEVE saperlo subito.
         logging.critical(f"Pagamento incassato ma prenotazione {tx['booking_id']} assente (sessione {session_id})")
+        await notify('payment_orphan', amount=tx.get('amount'), tag=session_id)
         if ADMIN_NOTIFY_EMAIL:
             asyncio.create_task(send_email_async(
                 ADMIN_NOTIFY_EMAIL,
@@ -87,10 +89,12 @@ async def _mark_paid(session_id: str, payment_intent: Optional[str]):
 
     booking = await db.bookings.find_one({'id': tx['booking_id']}, {'_id': 0})
     if booking:
+        asyncio.create_task(notify('booking_confirmed', booking=booking))
         asyncio.create_task(send_email_async(
             booking['guest_email'],
             f"Prenotazione confermata — {settings.get('villa_name', 'Light Blue')}",
             email_booking_confirmation_html(booking, settings),
+            ref_url=f"/admin/bookings?open={booking['id']}",
         ))
 
 

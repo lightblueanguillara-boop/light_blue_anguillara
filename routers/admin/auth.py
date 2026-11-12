@@ -1,12 +1,17 @@
 """Admin authentication: login, identity check, password change."""
 from datetime import datetime, timezone
 
+import asyncio
+import hashlib
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from auth import create_token, get_current_admin, hash_pwd, verify_pwd
 from db import db
 from models import AdminLogin, PasswordChange
+from notifications import notify
 from ratelimit import check_rate, rate_limit
+from routers.admin.push import device_label
 
 router = APIRouter()
 
@@ -20,7 +25,26 @@ async def admin_login(payload: AdminLogin, request: Request):
     if not admin or not verify_pwd(payload.password, admin['password_hash']):
         raise HTTPException(401, 'Credenziali non valide')
     token = create_token(payload.email, admin.get('token_version', 0))
+    await _check_new_device(admin, payload, request)
     return {'token': token, 'email': payload.email}
+
+
+async def _check_new_device(admin: dict, payload: AdminLogin, request: Request):
+    """Avvisa il proprietario se l'accesso arriva da un dispositivo mai visto prima."""
+    known = admin.get('known_devices') or []
+    label = device_label(request.headers.get('user-agent', ''))
+    now = datetime.now(timezone.utc).isoformat()
+    if payload.device_id:
+        dev = hashlib.sha256(payload.device_id.encode()).hexdigest()[:24]
+        if dev in known:
+            return
+        await db.admins.update_one({'email': admin['email']}, {'$push': {'known_devices': {'$each': [dev], '$slice': -20}}})
+        if not known:
+            return   # primo dispositivo in assoluto: nessun avviso
+        asyncio.create_task(notify('new_login', at=now, device=label, tag=dev))
+    else:
+        # accesso senza identificativo del dispositivo (es. chiamata diretta alle API): sempre segnalato
+        asyncio.create_task(notify('new_login', at=now, device=label))
 
 
 @router.get("/admin/me")

@@ -24,6 +24,7 @@ from routers.admin import router as admin_router  # noqa: E402
 from routers.payments import router as payments_router, cleanup_expired_bookings  # noqa: E402
 from routers.booking_requests import router as requests_router, expire_requests  # noqa: E402
 from routers.brand import router as brand_router  # noqa: E402
+from notifications import run_scheduled  # noqa: E402
 from routers.public import router as public_router  # noqa: E402
 
 logging.basicConfig(
@@ -122,6 +123,7 @@ async def _cleanup_scheduler_loop():
         try:
             await cleanup_expired_bookings()
             await expire_requests()
+            await run_scheduled()
         except Exception as e:
             logging.exception(f'Cleanup scheduler failed: {e}')
         await asyncio.sleep(5 * 60)  # ogni 5 minuti
