@@ -23,6 +23,7 @@ from ical_service import ical_sync_run  # noqa: E402
 from routers.admin import router as admin_router  # noqa: E402
 from routers.payments import router as payments_router, cleanup_expired_bookings  # noqa: E402
 from routers.booking_requests import router as requests_router, expire_requests  # noqa: E402
+from routers.brand import router as brand_router  # noqa: E402
 from routers.public import router as public_router  # noqa: E402
 
 logging.basicConfig(
@@ -43,6 +44,7 @@ api_router = APIRouter(prefix="/api")
 api_router.include_router(public_router)
 api_router.include_router(payments_router)
 api_router.include_router(requests_router)
+api_router.include_router(brand_router)
 api_router.include_router(admin_router)
 app.include_router(api_router)
 

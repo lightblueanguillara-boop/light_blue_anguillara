@@ -113,6 +113,7 @@ def client(app_client, mongo, fake_stripe, sent_emails):
                 'unsubscribed', 'marketing_logs', 'gallery', 'price_overrides'):
         mongo[col].delete_many({})
     mongo.settings.delete_many({})
+    mongo.brand_assets.delete_many({})
     mongo.admins.update_many({}, {'$set': {'token_version': 0}})
     return app_client
 

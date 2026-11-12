@@ -5,7 +5,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 import resend
 
-from db import RESEND_API_KEY, SENDER_EMAIL
+from db import RESEND_API_KEY, SENDER_EMAIL, PUBLIC_API_URL
 
 resend.api_key = RESEND_API_KEY
 
@@ -26,6 +26,18 @@ def _eur(value) -> str:
     except (TypeError, ValueError):
         return f"€ {value}"
     return "€ " + f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def _logo_url(settings: dict = None) -> str:
+    v = html.escape(str((settings or {}).get('logo_version', 'default')))
+    return f"{PUBLIC_API_URL}/api/brand/logo-256.png?v={v}"
+
+
+def _logo_html(settings: dict = None) -> str:
+    """Logo in testa alle email (preso dal server: cambia insieme al logo del sito)."""
+    villa = html.escape(str((settings or {}).get('villa_name') or 'Light Blue'))
+    return (f'<div style="text-align:center;margin:0 0 24px 0"><img src="{_logo_url(settings)}" alt="{villa}" '
+            f'width="72" height="72" style="display:inline-block;border:0;border-radius:50%" /></div>')
 
 
 def _it_date(iso: str) -> str:
@@ -116,6 +128,7 @@ def email_booking_confirmation_html(booking: dict, settings: dict) -> str:
 
     return f"""
     <div style="font-family:Manrope,Arial,sans-serif;max-width:560px;margin:0 auto;padding:32px;background:#FAF9F6;color:#2A333C">
+      {_logo_html(settings)}
       <h1 style="font-family:'Outfit',sans-serif;font-weight:300;font-size:28px;letter-spacing:-0.5px">Prenotazione confermata</h1>
       <p>Ciao {booking.get('guest_name')},</p>
       <p>la tua prenotazione presso <strong>{villa}</strong> è stata confermata.</p>
@@ -151,6 +164,7 @@ def email_modification_confirmation_html(booking: dict, settings: dict) -> str:
 
     return f"""
     <div style="font-family:Manrope,Arial,sans-serif;max-width:560px;margin:0 auto;padding:32px;background:#FAF9F6;color:#2A333C">
+      {_logo_html(settings)}
       <h1 style="font-family:'Outfit',sans-serif;font-weight:300;font-size:28px;letter-spacing:-0.5px">Modifica prenotazione</h1>
       <p>Ciao {booking.get('guest_name')},</p>
       <p>la tua prenotazione presso <strong>{villa}</strong> è stata modificata.</p>
@@ -173,6 +187,7 @@ def email_balance_reminder_html(booking: dict, settings: dict) -> str:
     balance = round(booking.get('total_price', 0) - booking.get('deposit_amount', 0), 2)
     return f"""
     <div style="font-family:Manrope,Arial,sans-serif;max-width:560px;margin:0 auto;padding:32px;background:#FAF9F6;color:#2A333C">
+      {_logo_html(settings)}
       <h1 style="font-family:'Outfit',sans-serif;font-weight:300;font-size:28px">Promemoria saldo</h1>
       <p>Ciao {booking.get('guest_name')},</p>
       <p>ti ricordiamo che per il tuo soggiorno a <strong>{villa}</strong> dal {_it_date(booking.get('check_in'))} al {_it_date(booking.get('check_out'))} è previsto un saldo residuo di <strong style="color:#7A93AC">{_eur(balance)}</strong>.</p>
@@ -207,6 +222,7 @@ def email_cancellation_html(booking: dict, settings: dict) -> str:
 
     return f"""
     <div style="font-family:Manrope,Arial,sans-serif;max-width:560px;margin:0 auto;padding:32px;background:#FAF9F6;color:#2A333C">
+      {_logo_html(settings)}
       <h1 style="font-family:'Outfit',sans-serif;font-weight:300;font-size:28px;letter-spacing:-0.5px">Prenotazione cancellata</h1>
       <p>Ciao {booking.get('guest_name')},</p>
       <p>la tua prenotazione presso <strong>{villa}</strong> è stata cancellata.</p>
@@ -249,7 +265,7 @@ def email_guest_contact_confirmation_html(msg: dict) -> str:
                       <tbody>
                         <tr>
                           <td align="center" style="padding:0;padding-bottom:10px">
-                            <img alt="Logo Light Blue" src="https://www.lightblueanguillara.com/favicon.ico" width="80" style="display:block;border:0;" />
+                            <img alt="Logo Light Blue" src="{_logo_url()}" width="80" height="80" style="display:block;border:0;border-radius:50%;" />
                           </td>
                         </tr>
                         <tr>
@@ -329,6 +345,7 @@ def _layout(title: str, body: str, settings: dict) -> str:
     villa = settings.get('villa_name', 'Light Blue')
     return f"""
     <div style="font-family:Manrope,Arial,sans-serif;max-width:560px;margin:0 auto;padding:32px;background:#FAF9F6;color:#2A333C">
+      {_logo_html(settings)}
       <h1 style="font-family:'Outfit',sans-serif;font-weight:300;font-size:28px;letter-spacing:-0.5px">{title}</h1>
       {body}
       <p>A presto,<br/>{villa}</p>

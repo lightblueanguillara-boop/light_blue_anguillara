@@ -17,3 +17,4 @@ cloudinary==1.41.0
 icalendar==7.0.3
 requests==2.33.1
 tzdata==2026.1
+Pillow==12.2.0

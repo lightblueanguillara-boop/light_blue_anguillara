@@ -25,6 +25,8 @@ ICAL_SYNC_INTERVAL_MINUTES = int(os.environ.get('ICAL_SYNC_INTERVAL_MINUTES', '3
 
 # URL pubblico del sito (per i link nelle email, es. disiscrizione newsletter)
 FRONTEND_URL = os.environ.get('FRONTEND_URL', 'https://www.lightblueanguillara.com').rstrip('/')
+# URL pubblico del backend (per il logo nelle email)
+PUBLIC_API_URL = os.environ.get('PUBLIC_API_URL', 'https://api.lightblueanguillara.com').rstrip('/')
 
 # Cloudinary (gestione della Galleria immagini)
 CLOUDINARY_CLOUD_NAME = os.environ.get('CLOUDINARY_CLOUD_NAME', '')

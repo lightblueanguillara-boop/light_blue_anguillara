@@ -233,6 +233,9 @@ class VillaSettings(BaseModel):
     booking_mode: Literal['instant', 'request'] = 'request'
     request_hold_hours: int = 24   # ore per rispondere a una richiesta (date bloccate)
     payment_link_hours: int = 24   # ore per pagare dopo l'accettazione (max 24, limite Stripe)
+    # Versioni di logo e immagine di anteprima (cambiano a ogni caricamento: servono per la cache)
+    logo_version: str = 'default'
+    share_version: str = 'default'
     # Dati legali (Informativa privacy, Condizioni di prenotazione, footer)
     legal_owner_name: str = ''
     legal_owner_tax_id: str = ''

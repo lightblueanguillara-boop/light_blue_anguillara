@@ -37,6 +37,8 @@ async def villa_info():
         'default_price_per_night': s.get('default_price_per_night'),
         'deposit_percent': s.get('deposit_percent'),
         'non_refundable_discount_percent': s.get('non_refundable_discount_percent', 5.0),
+        'logo_version': s.get('logo_version', 'default'),
+        'share_version': s.get('share_version', 'default'),
         'booking_mode': s.get('booking_mode', 'request'),
         'request_hold_hours': s.get('request_hold_hours', 24),
         'payment_link_hours': s.get('payment_link_hours', 24),
