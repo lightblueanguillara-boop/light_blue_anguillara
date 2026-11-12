@@ -19,7 +19,7 @@ from email_helpers import (
     _it_date
 )
 from models import BookingUpdate, RefundRequest, _validate_iso_date
-from pricing import compute_refund_amount
+from pricing import BLOCKING_STATUSES, compute_refund_amount
 
 router = APIRouter()
 stripe.api_key = STRIPE_API_KEY
@@ -63,7 +63,7 @@ async def create_manual_booking(payload: dict, admin=Depends(get_current_admin))
 
         # Controllo sovrapposizione date per nuove prenotazioni manuali
         existing_overlap = await db.bookings.find_one({
-            "status": {"$ne": "cancelled"},
+            "status": {"$in": BLOCKING_STATUSES},
             "check_in": {"$lt": check_out},
             "check_out": {"$gt": check_in}
         })
@@ -141,10 +141,10 @@ async def update_booking(booking_id: str, updates: BookingUpdate, admin=Depends(
         new_check_out = patch.get('check_out', current_b.get('check_out'))
         new_status = patch.get('status', current_b.get('status'))
         
-        if new_status != 'cancelled' and new_check_in and new_check_out:
+        if new_status in BLOCKING_STATUSES and new_check_in and new_check_out:
             existing_overlap = await db.bookings.find_one({
                 "id": {"$ne": current_b['id']},
-                "status": {"$ne": "cancelled"},
+                "status": {"$in": BLOCKING_STATUSES},
                 "check_in": {"$lt": new_check_out},
                 "check_out": {"$gt": new_check_in}
             })

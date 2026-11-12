@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Request, BackgroundTasks
 from db import db, get_settings, STRIPE_API_KEY, STRIPE_WEBHOOK_SECRET, ADMIN_NOTIFY_EMAIL, FRONTEND_URL
 from email_helpers import send_email_async, email_booking_confirmation_html
 from models import Booking, BookingCreate, PaymentTransaction, Subscriber
-from pricing import compute_dual_pricing, dates_available
+from pricing import BLOCKING_STATUSES, compute_dual_pricing, dates_available
 from ratelimit import rate_limit
 
 router = APIRouter()
@@ -152,12 +152,48 @@ async def cleanup_expired_bookings():
         logging.error(f"Cleanup Error: {e}")
 
 
+async def create_checkout_session(booking: dict, amount: float, payment_choice: str,
+                                  return_base: str, expires_ts: int, settings: dict):
+    """Crea la pagina di pagamento Stripe per una prenotazione e registra la transazione."""
+    session = await asyncio.to_thread(
+        stripe.checkout.Session.create,
+        payment_method_types=['card'],
+        line_items=[{
+            'price_data': {
+                'currency': 'eur',
+                'product_data': {'name': f"Soggiorno presso {settings.get('villa_name', 'Light Blue')} "
+                                         f"({booking['check_in']} → {booking['check_out']})"},
+                'unit_amount': int(round(amount * 100)),
+            },
+            'quantity': 1,
+        }],
+        mode='payment',
+        customer_email=booking['guest_email'],
+        expires_at=expires_ts,
+        success_url=f"{return_base}/payment/success?session_id={{CHECKOUT_SESSION_ID}}",
+        cancel_url=f"{return_base}/payment/cancel?session_id={{CHECKOUT_SESSION_ID}}",
+        metadata={'booking_id': booking['id'], 'payment_choice': payment_choice},
+    )
+    tx = PaymentTransaction(
+        session_id=session.id,
+        booking_id=booking['id'],
+        amount=amount,
+        payment_status='initiated',
+        status='open',
+        metadata={'payment_choice': payment_choice, 'booking_id': booking['id']},
+    )
+    await db.payment_transactions.insert_one(tx.model_dump())
+    return session
+
+
 # --- ROUTES -------------------------------------------------------------------
 
 @router.post("/bookings/checkout")
 async def create_booking_checkout(payload: BookingCreate, request: Request, background_tasks: BackgroundTasks):
     rate_limit(request, 'checkout', 10, 10 * 60)
     background_tasks.add_task(cleanup_expired_bookings)
+    if (await get_settings()).get('booking_mode', 'request') != 'instant':
+        raise HTTPException(403, 'Le prenotazioni online avvengono su richiesta: invia una richiesta di prenotazione.')
 
     if not await dates_available(payload.check_in, payload.check_out):
         raise HTTPException(409, 'Date non disponibili')
@@ -198,7 +234,7 @@ async def create_booking_checkout(payload: BookingCreate, request: Request, back
     # ha occupato le stesse date, vince la prima e questa viene annullata.
     rivals = await db.bookings.find({
         'id': {'$ne': booking.id},
-        'status': {'$in': ['pending', 'confirmed', 'external']},
+        'status': {'$in': BLOCKING_STATUSES},
         'check_in': {'$lt': booking.check_out},
         'check_out': {'$gt': booking.check_in},
     }, {'_id': 0, 'created_at': 1}).to_list(10)
@@ -207,43 +243,14 @@ async def create_booking_checkout(payload: BookingCreate, request: Request, back
         raise HTTPException(409, 'Date non disponibili')
 
     host_url = _return_base_url(payload.origin_url)
+    expires_ts = int((datetime.now(timezone.utc) + timedelta(minutes=CHECKOUT_MINUTES, seconds=30)).timestamp())
     try:
-        session = await asyncio.to_thread(
-            stripe.checkout.Session.create,
-            payment_method_types=['card'],
-            line_items=[{
-                'price_data': {
-                    'currency': 'eur',
-                    'product_data': {'name': f"Soggiorno presso {settings.get('villa_name', 'Light Blue')}"},
-                    'unit_amount': amount_cents,
-                },
-                'quantity': 1,
-            }],
-            mode='payment',
-            customer_email=payload.guest_email,
-            expires_at=int((datetime.now(timezone.utc) + timedelta(minutes=CHECKOUT_MINUTES, seconds=30)).timestamp()),
-            success_url=f"{host_url}/payment/success?session_id={{CHECKOUT_SESSION_ID}}",
-            cancel_url=f"{host_url}/payment/cancel?session_id={{CHECKOUT_SESSION_ID}}",
-            metadata={
-                'booking_id': booking.id,
-                'payment_choice': payload.payment_choice,
-            },
-        )
+        session = await create_checkout_session(booking.model_dump(), amount, payload.payment_choice, host_url, expires_ts, settings)
     except Exception:
         logging.exception('Stripe session create failed')
         await db.bookings.delete_one({'id': booking.id})
         # il dettaglio tecnico resta nei log: all'ospite un messaggio generico
         raise HTTPException(502, 'Il pagamento non è al momento disponibile. Riprova tra qualche minuto o contattaci.')
-
-    tx = PaymentTransaction(
-        session_id=session.id,
-        booking_id=booking.id,
-        amount=amount,
-        payment_status='initiated',
-        status='open',
-        metadata={'payment_choice': payload.payment_choice, 'booking_id': booking.id},
-    )
-    await db.payment_transactions.insert_one(tx.model_dump())
 
     # newsletter solo dopo che la sessione di pagamento è stata creata
     if payload.consent_newsletter:
@@ -325,6 +332,8 @@ async def stripe_webhook(request: Request):
         elif etype == 'checkout.session.expired':
             tx = await db.payment_transactions.find_one({'session_id': _obj_get(data, 'id')}, {'_id': 0})
             if tx:
+                from routers.booking_requests import expire_awaiting_payment
+                await expire_awaiting_payment(tx['booking_id'])
                 await db.bookings.delete_one({
                     'id': tx['booking_id'], 'status': 'pending', 'payment_status': 'unpaid', 'source': 'website',
                 })

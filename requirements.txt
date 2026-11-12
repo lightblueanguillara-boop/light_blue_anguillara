@@ -16,3 +16,4 @@ resend==2.29.0
 cloudinary==1.41.0
 icalendar==7.0.3
 requests==2.33.1
+tzdata==2026.1

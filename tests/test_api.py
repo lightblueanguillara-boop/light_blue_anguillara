@@ -137,13 +137,13 @@ def test_ical_export(client, mongo):
 
 
 # ---------------------------------------------------------------- checkout
-def test_checkout_requires_terms(client):
+def test_checkout_requires_terms(client, instant):
     r = client.post('/api/bookings/checkout', json=checkout_payload(accept_terms=False))
     assert r.status_code == 422
     assert 'Condizioni' in r.json()['detail']
 
 
-def test_checkout_creates_pending_booking(client, mongo, fake_stripe):
+def test_checkout_creates_pending_booking(client, mongo, fake_stripe, instant):
     r = client.post('/api/bookings/checkout', json=checkout_payload(is_refundable=False))
     assert r.status_code == 200, r.text
     j = r.json()
@@ -155,19 +155,19 @@ def test_checkout_creates_pending_booking(client, mongo, fake_stripe):
     assert kw['success_url'].startswith('http://localhost:3000/payment/success')
 
 
-def test_checkout_ignores_foreign_origin(client, fake_stripe):
+def test_checkout_ignores_foreign_origin(client, fake_stripe, instant):
     r = client.post('/api/bookings/checkout', json=checkout_payload(origin_url='https://evil.example'))
     kw = fake_stripe.sessions[r.json()['session_id']]['kw']
     assert kw['success_url'].startswith('https://www.example-site.test/')
 
 
-def test_checkout_overlap_is_rejected(client):
+def test_checkout_overlap_is_rejected(client, instant):
     assert client.post('/api/bookings/checkout', json=checkout_payload()).status_code == 200
     r = client.post('/api/bookings/checkout', json=checkout_payload(ci=31, co=35, guest_email='b@example.com'))
     assert r.status_code == 409
 
 
-def test_checkout_stripe_error_is_generic(client, mongo, fake_stripe):
+def test_checkout_stripe_error_is_generic(client, mongo, fake_stripe, instant):
     fake_stripe.fail_create = True
     r = client.post('/api/bookings/checkout', json=checkout_payload())
     assert r.status_code == 502
@@ -175,7 +175,7 @@ def test_checkout_stripe_error_is_generic(client, mongo, fake_stripe):
     assert mongo.bookings.count_documents({}) == 0
 
 
-def test_payment_status_confirms_booking(client, mongo, fake_stripe, sent_emails):
+def test_payment_status_confirms_booking(client, mongo, fake_stripe, sent_emails, instant):
     j = client.post('/api/bookings/checkout', json=checkout_payload()).json()
     fake_stripe.pay(j['session_id'])
     r = client.get(f"/api/payments/status/{j['session_id']}")
@@ -185,7 +185,7 @@ def test_payment_status_confirms_booking(client, mongo, fake_stripe, sent_emails
     assert wait_for(lambda: any(m['to'] == ['mario@example.com'] for m in sent_emails))
 
 
-def test_cancel_checkout_expires_session_and_frees_dates(client, mongo, fake_stripe):
+def test_cancel_checkout_expires_session_and_frees_dates(client, mongo, fake_stripe, instant):
     j = client.post('/api/bookings/checkout', json=checkout_payload()).json()
     r = client.delete(f"/api/bookings/checkout/{j['session_id']}")
     assert r.json()['cancelled'] is True
@@ -193,7 +193,7 @@ def test_cancel_checkout_expires_session_and_frees_dates(client, mongo, fake_str
     assert mongo.bookings.count_documents({}) == 0
 
 
-def test_cancel_checkout_after_payment_keeps_booking(client, mongo, fake_stripe):
+def test_cancel_checkout_after_payment_keeps_booking(client, mongo, fake_stripe, instant):
     j = client.post('/api/bookings/checkout', json=checkout_payload()).json()
     fake_stripe.pay(j['session_id'])
     r = client.delete(f"/api/bookings/checkout/{j['session_id']}")
@@ -212,7 +212,7 @@ def _run_cleanup(client):
     client.portal.call(cleanup_expired_bookings)
 
 
-def test_cleanup_never_deletes_while_stripe_session_is_open(client, mongo, fake_stripe):
+def test_cleanup_never_deletes_while_stripe_session_is_open(client, mongo, fake_stripe, instant):
     """Bug storico: dopo 10 minuti la prenotazione spariva mentre Stripe accettava ancora il pagamento."""
     j = client.post('/api/bookings/checkout', json=checkout_payload()).json()
     _age_booking(mongo, j['booking_id'], 15)
@@ -224,7 +224,7 @@ def test_cleanup_never_deletes_while_stripe_session_is_open(client, mongo, fake_
     assert mongo.bookings.find_one({'id': j['booking_id']})['status'] == 'confirmed'
 
 
-def test_cleanup_removes_abandoned_after_expiry(client, mongo, fake_stripe):
+def test_cleanup_removes_abandoned_after_expiry(client, mongo, fake_stripe, instant):
     j = client.post('/api/bookings/checkout', json=checkout_payload()).json()
     _age_booking(mongo, j['booking_id'], 40)
     _run_cleanup(client)
@@ -232,7 +232,7 @@ def test_cleanup_removes_abandoned_after_expiry(client, mongo, fake_stripe):
     assert fake_stripe.sessions[j['session_id']]['status'] == 'expired'
 
 
-def test_cleanup_confirms_late_payment_instead_of_deleting(client, mongo, fake_stripe):
+def test_cleanup_confirms_late_payment_instead_of_deleting(client, mongo, fake_stripe, instant):
     j = client.post('/api/bookings/checkout', json=checkout_payload()).json()
     _age_booking(mongo, j['booking_id'], 40)
     fake_stripe.pay(j['session_id'])
@@ -266,7 +266,7 @@ def test_webhook_requires_secret(client, monkeypatch):
     assert client.post('/api/webhook/stripe', content=json.dumps(ev)).status_code == 503
 
 
-def test_webhook_confirms_once(client, mongo, monkeypatch, sent_emails):
+def test_webhook_confirms_once(client, mongo, monkeypatch, sent_emails, instant):
     j = client.post('/api/bookings/checkout', json=checkout_payload()).json()
     _webhook_event(monkeypatch, 'checkout.session.completed',
                    {'id': j['session_id'], 'payment_status': 'paid', 'payment_intent': 'pi_1'})
@@ -279,7 +279,7 @@ def test_webhook_confirms_once(client, mongo, monkeypatch, sent_emails):
     assert len([m for m in sent_emails if m['to'] == ['mario@example.com']]) == 1
 
 
-def test_webhook_expired_frees_dates(client, mongo, monkeypatch):
+def test_webhook_expired_frees_dates(client, mongo, monkeypatch, instant):
     j = client.post('/api/bookings/checkout', json=checkout_payload()).json()
     _webhook_event(monkeypatch, 'checkout.session.expired', {'id': j['session_id']})
     client.post('/api/webhook/stripe', content=b'{}', headers={'Stripe-Signature': 's'})

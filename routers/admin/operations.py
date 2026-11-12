@@ -175,6 +175,10 @@ async def analytics(admin=Depends(get_current_admin)):
 
             'external_bookings': len(external_bookings),
 
+            # Richieste in attesa di risposta del proprietario
+            'open_requests': sum(1 for b in bookings if b.get('status') == 'request'),
+            'awaiting_payment': sum(1 for b in bookings if b.get('status') == 'awaiting_payment'),
+
             'new_messages': await db.contact_messages.count_documents({
                 'status': 'new'
             }),

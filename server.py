@@ -22,6 +22,7 @@ from db import db, get_settings, ICAL_SYNC_INTERVAL_MINUTES  # noqa: E402
 from ical_service import ical_sync_run  # noqa: E402
 from routers.admin import router as admin_router  # noqa: E402
 from routers.payments import router as payments_router, cleanup_expired_bookings  # noqa: E402
+from routers.booking_requests import router as requests_router, expire_requests  # noqa: E402
 from routers.public import router as public_router  # noqa: E402
 
 logging.basicConfig(
@@ -41,6 +42,7 @@ app = FastAPI(
 api_router = APIRouter(prefix="/api")
 api_router.include_router(public_router)
 api_router.include_router(payments_router)
+api_router.include_router(requests_router)
 api_router.include_router(admin_router)
 app.include_router(api_router)
 
@@ -112,11 +114,12 @@ async def _ical_scheduler_loop():
 
 
 async def _cleanup_scheduler_loop():
-    """Gira ogni 5 minuti e rimuove le prenotazioni pending abbandonate."""
+    """Ogni 5 minuti: rimuove i checkout abbandonati e chiude le richieste scadute."""
     await asyncio.sleep(60)  # attesa iniziale
     while True:
         try:
             await cleanup_expired_bookings()
+            await expire_requests()
         except Exception as e:
             logging.exception(f'Cleanup scheduler failed: {e}')
         await asyncio.sleep(5 * 60)  # ogni 5 minuti

@@ -122,3 +122,9 @@ def auth(client):
     r = client.post('/api/admin/login', json=ADMIN)
     assert r.status_code == 200, r.text
     return {'Authorization': f"Bearer {r.json()['token']}"}
+
+
+@pytest.fixture()
+def instant(client, mongo):
+    """Imposta la modalità di prenotazione immediata (pagamento subito)."""
+    mongo.settings.update_one({'id': 'global'}, {'$set': {'booking_mode': 'instant'}}, upsert=True)

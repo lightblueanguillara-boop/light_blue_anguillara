@@ -52,7 +52,7 @@ class Booking(BaseModel):
     deposit_amount: float
     payment_choice: Literal['deposit', 'full'] = 'deposit'
     is_refundable: bool = True
-    status: Literal['pending', 'confirmed', 'cancelled', 'external'] = 'pending'
+    status: Literal['pending', 'confirmed', 'cancelled', 'external', 'request', 'awaiting_payment', 'rejected', 'expired'] = 'pending'
     payment_status: Literal['unpaid', 'deposit_paid', 'fully_paid', 'refunded'] = 'unpaid'
     source: Literal['website', 'airbnb', 'booking', 'manual'] = 'website'
     notes: Optional[str] = None
@@ -61,6 +61,13 @@ class Booking(BaseModel):
     refund_amount: Optional[float] = None
     last_reminder_at: Optional[str] = None
     terms_accepted_at: Optional[str] = None
+    # Prenotazione su richiesta
+    contact_whatsapp: bool = False          # l'ospite accetta di essere contattato su WhatsApp
+    request_expires_at: Optional[str] = None  # entro quando il proprietario deve rispondere
+    payment_due_at: Optional[str] = None      # entro quando l'ospite deve pagare dopo l'ok
+    payment_url: Optional[str] = None
+    decided_at: Optional[str] = None
+    rejection_reason: Optional[str] = None
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 class BookingCreate(BaseModel):
@@ -90,8 +97,18 @@ class BookingCreate(BaseModel):
             raise ValueError('È necessario accettare le Condizioni di prenotazione')
         return self
 
+class BookingRequestCreate(BookingCreate):
+    """Richiesta di prenotazione (modalità "su richiesta"): il telefono è obbligatorio."""
+    guest_phone: str = Field(min_length=6, max_length=40)
+    contact_whatsapp: bool = False
+
+
+class RejectRequest(BaseModel):
+    reason: Optional[str] = Field(default=None, max_length=1000)
+
+
 class BookingUpdate(BaseModel):
-    status: Optional[Literal['pending', 'confirmed', 'cancelled', 'external']] = None
+    status: Optional[Literal['pending', 'confirmed', 'cancelled', 'external', 'request', 'awaiting_payment', 'rejected', 'expired']] = None
     payment_status: Optional[Literal['unpaid', 'deposit_paid', 'fully_paid', 'refunded']] = None
     guest_name: Optional[str] = None
     guest_email: Optional[EmailStr] = None
@@ -166,6 +183,10 @@ class VillaSettings(BaseModel):
     last_minute_discount_percent: float = 15.0
     last_minute_title: str = 'Last Minute'
     last_minute_subtitle: str = 'Sconto prossime date'
+    # Modalità di prenotazione: 'request' (su richiesta, default) o 'instant' (pagamento immediato)
+    booking_mode: Literal['instant', 'request'] = 'request'
+    request_hold_hours: int = 24   # ore per rispondere a una richiesta (date bloccate)
+    payment_link_hours: int = 24   # ore per pagare dopo l'accettazione (max 24, limite Stripe)
     # Dati legali (Informativa privacy, Condizioni di prenotazione, footer)
     legal_owner_name: str = ''
     legal_owner_tax_id: str = ''
@@ -192,6 +213,9 @@ class SettingsUpdate(BaseModel):
     last_minute_discount_percent: Optional[float] = Field(default=None, ge=0, le=90)
     last_minute_title: Optional[str] = None
     last_minute_subtitle: Optional[str] = None
+    booking_mode: Optional[Literal['instant', 'request']] = None
+    request_hold_hours: Optional[int] = Field(default=None, ge=1, le=168)
+    payment_link_hours: Optional[int] = Field(default=None, ge=1, le=24)
     legal_owner_name: Optional[str] = Field(default=None, max_length=200)
     legal_owner_tax_id: Optional[str] = Field(default=None, max_length=40)
     legal_owner_address: Optional[str] = Field(default=None, max_length=300)

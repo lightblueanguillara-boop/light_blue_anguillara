@@ -19,6 +19,15 @@ def _esc(data: dict) -> dict:
     return {k: html.escape(v, quote=True) if isinstance(v, str) else v for k, v in (data or {}).items()}
 
 
+def _eur(value) -> str:
+    """Importo in formato italiano: 1234.5 -> '€ 1.234,50'."""
+    try:
+        v = float(value or 0)
+    except (TypeError, ValueError):
+        return f"€ {value}"
+    return "€ " + f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
 def _it_date(iso: str) -> str:
     """Convert YYYY-MM-DD -> GG-MM-AAAA. Returns input on failure."""
     if not iso:
@@ -114,7 +123,7 @@ def email_booking_confirmation_html(booking: dict, settings: dict) -> str:
         <tr><td style="padding:8px 0;color:#5C6A79">Check-in</td><td style="padding:8px 0;text-align:right"><strong>{_it_date(booking.get('check_in'))}</strong></td></tr>
         <tr><td style="padding:8px 0;color:#5C6A79">Check-out</td><td style="padding:8px 0;text-align:right"><strong>{_it_date(booking.get('check_out'))}</strong></td></tr>
         <tr><td style="padding:8px 0;color:#5C6A79">Ospiti</td><td style="padding:8px 0;text-align:right">{booking.get('adults')} adulti, {booking.get('children')} bambini</td></tr>
-        <tr style="border-top:1px solid #E5E0D8"><td style="padding:12px 0;color:#2A333C;font-weight:bold">Totale complessivo</td><td style="padding:12px 0;text-align:right;color:#2A333C;font-size:16px"><strong>€{booking.get('total_price')}</strong></td></tr>
+        <tr style="border-top:1px solid #E5E0D8"><td style="padding:12px 0;color:#2A333C;font-weight:bold">Totale complessivo</td><td style="padding:12px 0;text-align:right;color:#2A333C;font-size:16px"><strong>{_eur(booking.get('total_price'))}</strong></td></tr>
         {cancellation_block}
       </table>
       <p>A presto,<br/>{villa}</p>
@@ -149,7 +158,7 @@ def email_modification_confirmation_html(booking: dict, settings: dict) -> str:
         <tr><td style="padding:8px 0;color:#5C6A79">Check-in</td><td style="padding:8px 0;text-align:right"><strong>{_it_date(booking.get('check_in'))}</strong></td></tr>
         <tr><td style="padding:8px 0;color:#5C6A79">Check-out</td><td style="padding:8px 0;text-align:right"><strong>{_it_date(booking.get('check_out'))}</strong></td></tr>
         <tr><td style="padding:8px 0;color:#5C6A79">Ospiti</td><td style="padding:8px 0;text-align:right">{booking.get('adults')} adulti, {booking.get('children')} bambini</td></tr>
-        <tr style="border-top:1px solid #E5E0D8"><td style="padding:12px 0;color:#2A333C;font-weight:bold">Totale complessivo</td><td style="padding:12px 0;text-align:right;color:#2A333C;font-size:16px"><strong>€{booking.get('total_price')}</strong></td></tr>
+        <tr style="border-top:1px solid #E5E0D8"><td style="padding:12px 0;color:#2A333C;font-weight:bold">Totale complessivo</td><td style="padding:12px 0;text-align:right;color:#2A333C;font-size:16px"><strong>{_eur(booking.get('total_price'))}</strong></td></tr>
         {cancellation_block}
       </table>
       <p>A presto,<br/>{villa}</p>
@@ -166,7 +175,7 @@ def email_balance_reminder_html(booking: dict, settings: dict) -> str:
     <div style="font-family:Manrope,Arial,sans-serif;max-width:560px;margin:0 auto;padding:32px;background:#FAF9F6;color:#2A333C">
       <h1 style="font-family:'Outfit',sans-serif;font-weight:300;font-size:28px">Promemoria saldo</h1>
       <p>Ciao {booking.get('guest_name')},</p>
-      <p>ti ricordiamo che per il tuo soggiorno a <strong>{villa}</strong> dal {_it_date(booking.get('check_in'))} al {_it_date(booking.get('check_out'))} è previsto un saldo residuo di <strong style="color:#7A93AC">€{balance}</strong>.</p>
+      <p>ti ricordiamo che per il tuo soggiorno a <strong>{villa}</strong> dal {_it_date(booking.get('check_in'))} al {_it_date(booking.get('check_out'))} è previsto un saldo residuo di <strong style="color:#7A93AC">{_eur(balance)}</strong>.</p>
       <p>Ti chiediamo gentilmente di completare il pagamento. Per qualsiasi domanda rispondi a questa email.</p>
       <p>Grazie,<br/>{villa}</p>
     </div>
@@ -205,7 +214,7 @@ def email_cancellation_html(booking: dict, settings: dict) -> str:
         <tr><td style="padding:8px 0;color:#5C6A79">Check-in</td><td style="padding:8px 0;text-align:right"><strong>{_it_date(booking.get('check_in'))}</strong></td></tr>
         <tr><td style="padding:8px 0;color:#5C6A79">Check-out</td><td style="padding:8px 0;text-align:right"><strong>{_it_date(booking.get('check_out'))}</strong></td></tr>
         <tr><td style="padding:8px 0;color:#5C6A79">Ospiti</td><td style="padding:8px 0;text-align:right">{booking.get('adults', 1)} adulti, {booking.get('children', 0)} bambini</td></tr>
-        <tr><td style="padding:8px 0;color:#5C6A79">Totale soggiorno</td><td style="padding:8px 0;text-align:right">€{booking.get('total_price')}</td></tr>
+        <tr><td style="padding:8px 0;color:#5C6A79">Totale soggiorno</td><td style="padding:8px 0;text-align:right">{_eur(booking.get('total_price'))}</td></tr>
         {refund_row}
       </table>
       <p style="color:#5C6A79;font-size:14px">
@@ -299,3 +308,123 @@ def email_admin_contact_notification_html(msg: dict) -> str:
       <blockquote style="border-left:3px solid #7A93AC;padding-left:12px;color:#5C6A79">{msg.get('message')}</blockquote>
     </div>
     """
+
+
+# =============================================================================
+# Prenotazione su richiesta
+# =============================================================================
+
+def _it_datetime(iso: str) -> str:
+    """ISO datetime (UTC) -> 'GG-MM-AAAA alle HH:MM' ora italiana."""
+    try:
+        from zoneinfo import ZoneInfo
+        dt = datetime.fromisoformat(iso).astimezone(ZoneInfo('Europe/Rome'))
+        return dt.strftime('%d-%m-%Y alle %H:%M')
+    except Exception:
+        return iso or ''
+
+
+def _layout(title: str, body: str, settings: dict) -> str:
+    """Grafica comune delle email (stessa della conferma di prenotazione)."""
+    villa = settings.get('villa_name', 'Light Blue')
+    return f"""
+    <div style="font-family:Manrope,Arial,sans-serif;max-width:560px;margin:0 auto;padding:32px;background:#FAF9F6;color:#2A333C">
+      <h1 style="font-family:'Outfit',sans-serif;font-weight:300;font-size:28px;letter-spacing:-0.5px">{title}</h1>
+      {body}
+      <p>A presto,<br/>{villa}</p>
+      <p style="color:#5C6A79;font-size:12px;margin-top:32px">{settings.get('villa_address','')}<br/>CIN {settings.get('villa_cir','')}</p>
+    </div>
+    """
+
+
+def _stay_table(b: dict) -> str:
+    return f"""
+      <table style="width:100%;border-collapse:collapse;margin:24px 0">
+        <tr><td style="padding:8px 0;color:#5C6A79">Check-in</td><td style="padding:8px 0;text-align:right"><strong>{_it_date(b.get('check_in'))}</strong></td></tr>
+        <tr><td style="padding:8px 0;color:#5C6A79">Check-out</td><td style="padding:8px 0;text-align:right"><strong>{_it_date(b.get('check_out'))}</strong></td></tr>
+        <tr><td style="padding:8px 0;color:#5C6A79">Ospiti</td><td style="padding:8px 0;text-align:right">{b.get('adults')} adulti, {b.get('children')} bambini</td></tr>
+        <tr><td style="padding:8px 0;color:#5C6A79">Tariffa</td><td style="padding:8px 0;text-align:right">{'Rimborsabile' if b.get('is_refundable', True) else 'Non rimborsabile'}</td></tr>
+        <tr style="border-top:1px solid #E5E0D8"><td style="padding:12px 0;font-weight:bold">Totale</td><td style="padding:12px 0;text-align:right;font-size:16px"><strong>{_eur(b.get('total_price'))}</strong></td></tr>
+      </table>"""
+
+
+def email_request_received_html(booking: dict, settings: dict) -> str:
+    b, s = _esc(booking), _esc(settings)
+    body = f"""
+      <p>Ciao {b.get('guest_name')},</p>
+      <p>abbiamo ricevuto la tua <strong>richiesta di prenotazione</strong>. Non è ancora una prenotazione confermata
+      e <strong>non ti è stato addebitato nulla</strong>.</p>
+      {_stay_table(b)}
+      <p>Ti risponderemo entro il <strong>{_it_datetime(booking.get('request_expires_at'))}</strong>: nel frattempo le date restano riservate per te.
+      Se la richiesta viene accettata riceverai un link per completare il pagamento e confermare il soggiorno.</p>"""
+    return _layout('Richiesta ricevuta', body, s)
+
+
+def email_request_admin_html(booking: dict, settings: dict, dashboard_url: str) -> str:
+    b, s = _esc(booking), _esc(settings)
+    body = f"""
+      <p>È arrivata una nuova richiesta di prenotazione dal sito.</p>
+      <p><strong>{b.get('guest_name')}</strong><br/>{b.get('guest_email')} · {b.get('guest_phone') or ''}
+      {' · contattabile su WhatsApp' if booking.get('contact_whatsapp') else ''}</p>
+      {_stay_table(b)}
+      {f'<p style="background:#fff8e6;padding:12px;border-left:3px solid #e0b040"><em>{b.get("notes")}</em></p>' if b.get('notes') else ''}
+      <p>Rispondi entro il <strong>{_it_datetime(booking.get('request_expires_at'))}</strong>, poi la richiesta scade e le date si liberano.</p>
+      <p><a href="{dashboard_url}" style="display:inline-block;background:#7A93AC;color:#fff;padding:12px 24px;text-decoration:none;border-radius:2px">Apri il pannello per accettare o rifiutare</a></p>"""
+    return _layout('Nuova richiesta di prenotazione', body, s)
+
+
+def email_request_approved_html(booking: dict, settings: dict) -> str:
+    b, s = _esc(booking), _esc(settings)
+    url = html.escape(booking.get('payment_url') or '', quote=True)
+    body = f"""
+      <p>Ciao {b.get('guest_name')},</p>
+      <p>buone notizie: la tua richiesta è stata <strong>accettata</strong>!</p>
+      {_stay_table(b)}
+      <p>Per confermare la prenotazione completa il pagamento entro il <strong>{_it_datetime(booking.get('payment_due_at'))}</strong>.
+      Dopo questa scadenza le date torneranno disponibili.</p>
+      <p style="text-align:center;margin:28px 0"><a href="{url}" style="display:inline-block;background:#2A333C;color:#fff;padding:14px 32px;text-decoration:none;border-radius:2px;font-weight:bold;letter-spacing:1px">PAGA E CONFERMA</a></p>
+      <p style="font-size:13px;color:#5C6A79">Pagamento sicuro tramite Stripe. Riceverai la conferma definitiva via email a pagamento completato.</p>"""
+    return _layout('Richiesta accettata', body, s)
+
+
+def email_request_rejected_html(booking: dict, settings: dict) -> str:
+    b, s = _esc(booking), _esc(settings)
+    reason = b.get('rejection_reason')
+    body = f"""
+      <p>Ciao {b.get('guest_name')},</p>
+      <p>ci dispiace, ma non possiamo accettare la tua richiesta di prenotazione dal {_it_date(b.get('check_in'))} al {_it_date(b.get('check_out'))}.</p>
+      {f'<p style="background:#f4f1ec;padding:12px"><em>{reason}</em></p>' if reason else ''}
+      <p>Non ti è stato addebitato nulla. Se vuoi, puoi provare altre date sul nostro sito.</p>"""
+    return _layout('Richiesta non accettata', body, s)
+
+
+def email_request_expired_html(booking: dict, settings: dict, unpaid: bool) -> str:
+    b, s = _esc(booking), _esc(settings)
+    if unpaid:
+        text = ('il tempo per completare il pagamento è scaduto e la prenotazione non è stata confermata. '
+                'Non ti è stato addebitato nulla. Se sei ancora interessato puoi inviare una nuova richiesta dal sito.')
+    else:
+        text = ('purtroppo non siamo riusciti a rispondere in tempo alla tua richiesta, che è scaduta. '
+                'Non ti è stato addebitato nulla: ci scusiamo e ti invitiamo a contattarci o a inviare una nuova richiesta.')
+    body = f"""
+      <p>Ciao {b.get('guest_name')},</p>
+      <p>riguardo al soggiorno dal {_it_date(b.get('check_in'))} al {_it_date(b.get('check_out'))}: {text}</p>"""
+    return _layout('Richiesta scaduta', body, s)
+
+
+def whatsapp_text(kind: str, booking: dict, settings: dict) -> str:
+    """Testo pronto da inviare su WhatsApp (testo semplice, niente HTML)."""
+    villa = settings.get('villa_name', 'Light Blue')
+    first = (booking.get('guest_name') or '').split(' ')[0] or 'Ciao'
+    dates = f"dal {_it_date(booking.get('check_in'))} al {_it_date(booking.get('check_out'))}"
+    if kind == 'approved':
+        return (f"Ciao {first}! La tua richiesta di soggiorno a {villa} {dates} è stata accettata 🎉\n"
+                f"Per confermare completa il pagamento entro il {_it_datetime(booking.get('payment_due_at'))}:\n"
+                f"{booking.get('payment_url')}\n"
+                f"Trovi lo stesso link anche nella tua email. A presto!")
+    if kind == 'rejected':
+        reason = booking.get('rejection_reason')
+        return (f"Ciao {first}, grazie per la richiesta di soggiorno a {villa} {dates}. "
+                f"Purtroppo non possiamo accettarla" + (f": {reason}" if reason else ".") +
+                " Non ti è stato addebitato nulla. Speriamo di ospitarti in un'altra occasione!")
+    return (f"Ciao {first}, ti scrivo da {villa} riguardo alla tua richiesta di soggiorno {dates}.")

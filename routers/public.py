@@ -12,7 +12,7 @@ from auth import email_from_newsletter_token
 from db import db, get_settings, ADMIN_NOTIFY_EMAIL
 from email_helpers import send_email_async, email_admin_contact_notification_html, email_guest_contact_confirmation_html
 from models import ContactMessage, ContactCreate, Subscriber, GalleryImage, _validate_iso_date, validate_stay
-from pricing import compute_dual_pricing, dates_available, daterange
+from pricing import BLOCKING_STATUSES, compute_dual_pricing, dates_available, daterange
 from ratelimit import rate_limit, check_rate
 
 router = APIRouter()
@@ -37,6 +37,9 @@ async def villa_info():
         'default_price_per_night': s.get('default_price_per_night'),
         'deposit_percent': s.get('deposit_percent'),
         'non_refundable_discount_percent': s.get('non_refundable_discount_percent', 5.0),
+        'booking_mode': s.get('booking_mode', 'request'),
+        'request_hold_hours': s.get('request_hold_hours', 24),
+        'payment_link_hours': s.get('payment_link_hours', 24),
         'legal_owner_name': s.get('legal_owner_name', ''),
         'legal_owner_tax_id': s.get('legal_owner_tax_id', ''),
         'legal_owner_address': s.get('legal_owner_address', ''),
@@ -59,7 +62,7 @@ async def availability(start: str, end: str):
     except ValueError:
         raise HTTPException(400, 'Date non valide (formato AAAA-MM-GG)')
     bookings = await db.bookings.find(
-        {'status': {'$in': ['pending', 'confirmed', 'external']}}, {'_id': 0}
+        {'status': {'$in': BLOCKING_STATUSES}}, {'_id': 0}
     ).to_list(10000)
     blocked = []
     for b in bookings:
@@ -154,7 +157,7 @@ async def last_minute():
     today = datetime.now(timezone.utc).date()
     end = today + timedelta(days=window)
     bookings = await db.bookings.find(
-        {'status': {'$in': ['pending', 'confirmed', 'external']}}, {'_id': 0}
+        {'status': {'$in': BLOCKING_STATUSES}}, {'_id': 0}
     ).to_list(10000)
     blocked: set = set()
     for b in bookings:
@@ -202,7 +205,7 @@ async def export_ical():
     cal.add('prodid', '-//Light Blue Anguillara Sabazia//IT')
     cal.add('version', '2.0')
     bookings = await db.bookings.find(
-        {'status': {'$in': ['confirmed', 'pending', 'external']}}, {'_id': 0}
+        {'status': {'$in': BLOCKING_STATUSES}}, {'_id': 0}
     ).to_list(10000)
     for b in bookings:
         ev = Event()

@@ -3,6 +3,12 @@ from typing import Optional
 
 from db import db, get_settings
 
+# Stati di prenotazione che occupano le date sul calendario.
+#  pending          = pagamento online in corso (modalità immediata)
+#  request          = richiesta in attesa di risposta del proprietario
+#  awaiting_payment = richiesta accettata, in attesa del pagamento dal link
+BLOCKING_STATUSES = ['pending', 'confirmed', 'external', 'request', 'awaiting_payment']
+
 
 def daterange(start: str, end: str):
     s = datetime.strptime(start, '%Y-%m-%d').date()
@@ -108,7 +114,7 @@ async def compute_dual_pricing(check_in: str, check_out: str):
 
 async def dates_available(check_in: str, check_out: str, exclude_id: Optional[str] = None) -> bool:
     bookings = await db.bookings.find(
-        {'status': {'$in': ['pending', 'confirmed', 'external']}}, {'_id': 0}
+        {'status': {'$in': BLOCKING_STATUSES}}, {'_id': 0}
     ).to_list(10000)
     ci = datetime.strptime(check_in, '%Y-%m-%d').date()
     co = datetime.strptime(check_out, '%Y-%m-%d').date()
