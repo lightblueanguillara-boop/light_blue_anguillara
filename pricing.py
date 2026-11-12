@@ -7,7 +7,8 @@ from db import db, get_settings
 #  pending          = pagamento online in corso (modalità immediata)
 #  request          = richiesta in attesa di risposta del proprietario
 #  awaiting_payment = richiesta accettata, in attesa del pagamento dal link
-BLOCKING_STATUSES = ['pending', 'confirmed', 'external', 'request', 'awaiting_payment']
+#  blocked          = date chiuse dal proprietario (uso personale, manutenzione...)
+BLOCKING_STATUSES = ['pending', 'confirmed', 'external', 'request', 'awaiting_payment', 'blocked']
 
 
 def daterange(start: str, end: str):
@@ -19,8 +20,8 @@ def daterange(start: str, end: str):
         cur += timedelta(days=1)
 
 
-def price_for_date(d: date, settings: dict) -> float:
-    """Pick highest-priority seasonal rate matching the date; fallback to default."""
+def rate_for_date(d: date, settings: dict) -> tuple:
+    """Tariffa di una notte da tariffe stagionali/base: (prezzo, nome tariffa o None)."""
     rates = settings.get('seasonal_rates', [])
     best = None
     for r in rates:
@@ -46,30 +47,23 @@ def price_for_date(d: date, settings: dict) -> float:
         except Exception:
             continue
     if best:
-        return float(best['price_per_night'])
-    return float(settings.get('default_price_per_night', 250.0))
+        return float(best['price_per_night']), best.get('name')
+    return float(settings.get('default_price_per_night', 120.0)), None
 
 
-async def compute_stay_pricing(check_in: str, check_out: str):
-    """Calcola il prezzo base (Rimborsabile) per un soggiorno."""
-    settings = await get_settings()
-    total = 0.0
-    nights = 0
-    breakdown = []
-    for d in daterange(check_in, check_out):
-        p = price_for_date(d, settings)
-        total += p
-        nights += 1
-        breakdown.append({'date': d.isoformat(), 'price': p})
-    deposit_pct = settings.get('deposit_percent', 30.0)
-    deposit = round(total * deposit_pct / 100.0, 2)
-    return {
-        'nights': nights,
-        'total': round(total, 2),
-        'deposit_amount': deposit,
-        'deposit_percent': deposit_pct,
-        'breakdown': breakdown,
-    }
+def price_for_date(d: date, settings: dict, overrides: Optional[dict] = None) -> float:
+    """Prezzo di una notte: prezzo personalizzato dal calendario > tariffa stagionale > prezzo base."""
+    if overrides and d.isoformat() in overrides:
+        return float(overrides[d.isoformat()])
+    return rate_for_date(d, settings)[0]
+
+
+async def load_price_overrides(start: str, end: str) -> dict:
+    """Prezzi personalizzati {YYYY-MM-DD: prezzo} per le notti in [start, end)."""
+    docs = await db.price_overrides.find(
+        {'date': {'$gte': start, '$lt': end}}, {'_id': 0, 'date': 1, 'price': 1}
+    ).to_list(1000)
+    return {x['date']: x['price'] for x in docs}
 
 
 async def compute_dual_pricing(check_in: str, check_out: str):
@@ -85,11 +79,12 @@ async def compute_dual_pricing(check_in: str, check_out: str):
     - breakdown: elenco prezzi giornalieri
     """
     settings = await get_settings()
+    overrides = await load_price_overrides(check_in, check_out)
     total = 0.0
     nights = 0
     breakdown = []
     for d in daterange(check_in, check_out):
-        p = price_for_date(d, settings)
+        p = price_for_date(d, settings, overrides)
         total += p
         nights += 1
         breakdown.append({'date': d.isoformat(), 'price': p})

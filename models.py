@@ -52,9 +52,9 @@ class Booking(BaseModel):
     deposit_amount: float
     payment_choice: Literal['deposit', 'full'] = 'deposit'
     is_refundable: bool = True
-    status: Literal['pending', 'confirmed', 'cancelled', 'external', 'request', 'awaiting_payment', 'rejected', 'expired'] = 'pending'
+    status: Literal['pending', 'confirmed', 'cancelled', 'external', 'request', 'awaiting_payment', 'rejected', 'expired', 'blocked'] = 'pending'
     payment_status: Literal['unpaid', 'deposit_paid', 'fully_paid', 'refunded'] = 'unpaid'
-    source: Literal['website', 'airbnb', 'booking', 'manual'] = 'website'
+    source: Literal['website', 'airbnb', 'booking', 'manual', 'block'] = 'website'
     notes: Optional[str] = None
     consent_newsletter: bool = False
     payment_intent_id: Optional[str] = None
@@ -107,8 +107,54 @@ class RejectRequest(BaseModel):
     reason: Optional[str] = Field(default=None, max_length=1000)
 
 
+class BlockCreate(BaseModel):
+    """Date chiuse dal proprietario. check_out = giorno successivo all'ultima notte bloccata."""
+    check_in: str
+    check_out: str
+    note: Optional[str] = Field(default=None, max_length=300)
+
+    @field_validator('check_in', 'check_out')
+    @classmethod
+    def _date_format(cls, v):
+        return _validate_iso_date(v)
+
+    @model_validator(mode='after')
+    def _check(self):
+        ci = datetime.strptime(self.check_in, '%Y-%m-%d').date()
+        co = datetime.strptime(self.check_out, '%Y-%m-%d').date()
+        if co <= ci:
+            raise ValueError('Seleziona almeno una notte')
+        if (co - ci).days > 366:
+            raise ValueError('Puoi bloccare al massimo un anno alla volta')
+        if ci < date.today():
+            raise ValueError('Non puoi bloccare date passate')
+        return self
+
+
+class PriceUpdate(BaseModel):
+    """Prezzo personalizzato per le notti in [start, end). price=None ripristina la tariffa normale."""
+    start: str
+    end: str
+    price: Optional[float] = Field(default=None, gt=0, le=100000)
+
+    @field_validator('start', 'end')
+    @classmethod
+    def _date_format(cls, v):
+        return _validate_iso_date(v)
+
+    @model_validator(mode='after')
+    def _check(self):
+        s = datetime.strptime(self.start, '%Y-%m-%d').date()
+        e = datetime.strptime(self.end, '%Y-%m-%d').date()
+        if e <= s:
+            raise ValueError('Seleziona almeno una notte')
+        if (e - s).days > 366:
+            raise ValueError('Puoi modificare al massimo un anno alla volta')
+        return self
+
+
 class BookingUpdate(BaseModel):
-    status: Optional[Literal['pending', 'confirmed', 'cancelled', 'external', 'request', 'awaiting_payment', 'rejected', 'expired']] = None
+    status: Optional[Literal['pending', 'confirmed', 'cancelled', 'external', 'request', 'awaiting_payment', 'rejected', 'expired', 'blocked']] = None
     payment_status: Optional[Literal['unpaid', 'deposit_paid', 'fully_paid', 'refunded']] = None
     guest_name: Optional[str] = None
     guest_email: Optional[EmailStr] = None
