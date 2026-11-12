@@ -1,11 +1,22 @@
 import asyncio
+import html
 import logging
 from datetime import datetime, timezone, timedelta
+from typing import Optional
 import resend
 
 from db import RESEND_API_KEY, SENDER_EMAIL
 
 resend.api_key = RESEND_API_KEY
+
+
+def _esc(data: dict) -> dict:
+    """Copia del dizionario con tutte le stringhe "escapate" per l'HTML.
+
+    I campi delle prenotazioni e dei messaggi arrivano da form pubblici: senza escape
+    chiunque potrebbe inserire link o markup nelle email inviate dal nostro dominio.
+    """
+    return {k: html.escape(v, quote=True) if isinstance(v, str) else v for k, v in (data or {}).items()}
 
 
 def _it_date(iso: str) -> str:
@@ -65,9 +76,11 @@ def _cancellation_policy_info(booking: dict, settings: dict) -> dict:
     }
 
 
-async def send_email_async(to_email: str, subject: str, html: str) -> bool:
+async def send_email_async(to_email: str, subject: str, html_body: str, headers: Optional[dict] = None) -> bool:
     try:
-        params = {'from': SENDER_EMAIL, 'to': [to_email], 'subject': subject, 'html': html}
+        params = {'from': SENDER_EMAIL, 'to': [to_email], 'subject': subject, 'html': html_body}
+        if headers:
+            params['headers'] = headers
         await asyncio.to_thread(resend.Emails.send, params)
         return True
     except Exception as e:
@@ -76,6 +89,7 @@ async def send_email_async(to_email: str, subject: str, html: str) -> bool:
 
 
 def email_booking_confirmation_html(booking: dict, settings: dict) -> str:
+    booking, settings = _esc(booking), _esc(settings)
     villa = settings.get('villa_name', 'Light Blue')
 
     # Recupera testo politica basato su is_refundable
@@ -104,13 +118,14 @@ def email_booking_confirmation_html(booking: dict, settings: dict) -> str:
         {cancellation_block}
       </table>
       <p>A presto,<br/>{villa}</p>
-      <p style="color:#5C6A79;font-size:12px;margin-top:32px">{settings.get('villa_address','')}<br/>CIR {settings.get('villa_cir','')}</p>
+      <p style="color:#5C6A79;font-size:12px;margin-top:32px">{settings.get('villa_address','')}<br/>CIN {settings.get('villa_cir','')}</p>
     </div>
     """
 
 
 def email_modification_confirmation_html(booking: dict, settings: dict) -> str:
     """Email di modifica prenotazione — simile alla conferma."""
+    booking, settings = _esc(booking), _esc(settings)
     villa = settings.get('villa_name', 'Light Blue')
 
     pol = _cancellation_policy_info(booking, settings)
@@ -138,12 +153,13 @@ def email_modification_confirmation_html(booking: dict, settings: dict) -> str:
         {cancellation_block}
       </table>
       <p>A presto,<br/>{villa}</p>
-      <p style="color:#5C6A79;font-size:12px;margin-top:32px">{settings.get('villa_address','')}<br/>CIR {settings.get('villa_cir','')}</p>
+      <p style="color:#5C6A79;font-size:12px;margin-top:32px">{settings.get('villa_address','')}<br/>CIN {settings.get('villa_cir','')}</p>
     </div>
     """
 
 
 def email_balance_reminder_html(booking: dict, settings: dict) -> str:
+    booking, settings = _esc(booking), _esc(settings)
     villa = settings.get('villa_name', 'Light Blue')
     balance = round(booking.get('total_price', 0) - booking.get('deposit_amount', 0), 2)
     return f"""
@@ -159,6 +175,7 @@ def email_balance_reminder_html(booking: dict, settings: dict) -> str:
 
 def email_cancellation_html(booking: dict, settings: dict) -> str:
     """Email di cancellazione prenotazione — stessa grafica della conferma."""
+    booking, settings = _esc(booking), _esc(settings)
     villa = settings.get('villa_name', 'Light Blue')
     total_paid = 0.0
     if booking.get('payment_status') == 'deposit_paid':
@@ -168,7 +185,7 @@ def email_cancellation_html(booking: dict, settings: dict) -> str:
 
     refund_row = ''
     if total_paid and total_paid > 0:
-        refund_row = f"""
+        refund_row = """
         <tr style="border-top:1px solid #E5E0D8">
           <td colspan="2" style="padding:16px 0 4px 0">
             <strong style="color:#2A333C">Rimborso</strong><br/>
@@ -195,14 +212,15 @@ def email_cancellation_html(booking: dict, settings: dict) -> str:
         Per qualsiasi domanda o chiarimento non esitare a contattarci.
       </p>
       <p>A presto,<br/>{villa}</p>
-      <p style="color:#5C6A79;font-size:12px;margin-top:32px">{settings.get('villa_address','')}<br/>CIR {settings.get('villa_cir','')}</p>
+      <p style="color:#5C6A79;font-size:12px;margin-top:32px">{settings.get('villa_address','')}<br/>CIN {settings.get('villa_cir','')}</p>
     </div>
     """
 
 
 def email_guest_contact_confirmation_html(msg: dict) -> str:
     """Email di conferma ricezione contatto inviata automaticamente all'ospite."""
-    name = msg.get('name', '').split()[0] if msg.get('name') else 'Ospite'
+    raw_name = (msg.get('name') or '').split()
+    name = html.escape(raw_name[0][:40]) if raw_name else 'Ospite'
     return f"""<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
 <html dir="ltr" lang="it">
   <head>
@@ -272,6 +290,7 @@ def email_guest_contact_confirmation_html(msg: dict) -> str:
 
 
 def email_admin_contact_notification_html(msg: dict) -> str:
+    msg = _esc(msg)
     return f"""
     <div style="font-family:Manrope,Arial,sans-serif;max-width:560px;margin:0 auto;padding:32px;color:#2A333C">
       <h2 style="font-family:'Outfit',sans-serif;font-weight:300">Nuova richiesta dal sito</h2>

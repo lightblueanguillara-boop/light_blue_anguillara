@@ -1,113 +1,180 @@
 """Stripe payments: booking checkout, status polling, webhook, and cleanup."""
 import asyncio
-import json as _json
 import logging
+import os
 from datetime import datetime, timezone, timedelta
+from typing import Optional
 
 import stripe
 from fastapi import APIRouter, HTTPException, Request, BackgroundTasks
 
-from db import db, get_settings, STRIPE_API_KEY, STRIPE_WEBHOOK_SECRET
+from db import db, get_settings, STRIPE_API_KEY, STRIPE_WEBHOOK_SECRET, ADMIN_NOTIFY_EMAIL, FRONTEND_URL
 from email_helpers import send_email_async, email_booking_confirmation_html
 from models import Booking, BookingCreate, PaymentTransaction, Subscriber
 from pricing import compute_dual_pricing, dates_available
+from ratelimit import rate_limit
 
 router = APIRouter()
 stripe.api_key = STRIPE_API_KEY
 
-# --- UTILS & CLEANUP ---
+# Durata della pagina di pagamento Stripe (minimo consentito da Stripe: 30 minuti).
+CHECKOUT_MINUTES = 30
+# Le prenotazioni "pending" vengono ripulite solo DOPO la scadenza della sessione Stripe,
+# così un ospite che paga all'ultimo minuto non perde mai la prenotazione.
+CLEANUP_AFTER_MINUTES = CHECKOUT_MINUTES + 5
 
-async def cleanup_expired_bookings():
-    """
-    Rimuove solo le prenotazioni PENDING provenienti dal SITO che sono state abbandonate.
-    NON tocca le prenotazioni manuali o esterne.
-    """
-    try:
-        # Limite di 10 minuti fa (allineato alla durata reale del checkout Stripe)
-        cutoff_dt = datetime.now(timezone.utc) - timedelta(minutes=10)
-        cutoff_iso = cutoff_dt.isoformat()
-        
-        # FILTRO DI PROTEZIONE: 
-        # Cancelliamo solo se:
-        # 1. status è 'pending'
-        # 2. payment_status è 'unpaid'
-        # 3. source è 'website'  <-- Fondamentale per proteggere le tue manuali
-        # 4. created_at è vecchio
-        expired_bookings = await db.bookings.find({
-            'status': 'pending',
-            'payment_status': 'unpaid',
-            'source': 'website', 
-            'created_at': {'$lt': cutoff_iso}
-        }).to_list(length=100)
 
-        for b in expired_bookings:
-            booking_id = b.get('id')
-            await db.bookings.delete_one({'id': booking_id})
-            # Puliamo anche le transazioni Stripe rimaste aperte nel DB
-            await db.payment_transactions.delete_one({'booking_id': booking_id})
-            logging.info(f"Cleanup: rimosso tentativo di prenotazione sito abbandonato {booking_id}")
-            
-    except Exception as e:
-        logging.error(f"Cleanup Error: {e}")
+def _allowed_origins() -> list:
+    raw = os.environ.get('CORS_ORIGINS', '*')
+    return [o.strip().rstrip('/') for o in raw.split(',') if o.strip()]
 
-async def _retrieve_payment_intent_id(session_id: str) -> str | None:
-    try:
-        s = await asyncio.to_thread(stripe.checkout.Session.retrieve, session_id)
-        pi = getattr(s, 'payment_intent', None)
-        if pi and hasattr(pi, 'id'):
-            return pi.id
-        return pi
-    except Exception as e:
-        logging.error(f"PaymentIntent retrieval error: {e}")
+
+def _return_base_url(origin_url: str) -> str:
+    """URL a cui Stripe rimanda l'ospite: solo domini nostri, mai un URL arbitrario."""
+    origin = (origin_url or '').rstrip('/')
+    allowed = _allowed_origins()
+    if origin and ('*' in allowed or origin in allowed):
+        return origin
+    return FRONTEND_URL
+
+
+def _obj_get(obj, key):
+    """Legge un campo sia da StripeObject sia da dict."""
+    if obj is None:
         return None
+    if isinstance(obj, dict):
+        return obj.get(key)
+    return getattr(obj, key, None)
 
-async def _on_payment_paid(session_id: str, choice: str, booking_id: str):
-    pi = await _retrieve_payment_intent_id(session_id)
-    new_payment_status = 'fully_paid' if choice == 'full' else 'deposit_paid'
-    update = {'status': 'confirmed', 'payment_status': new_payment_status}
-    
-    if pi:
-        update['payment_intent_id'] = pi
-        await db.payment_transactions.update_one(
-            {'session_id': session_id}, {'$set': {'payment_intent_id': pi}}
-        )
-        
-    await db.bookings.update_one({'id': booking_id}, {'$set': update})
-    booking = await db.bookings.find_one({'id': booking_id}, {'_id': 0})
+
+# --- PAGAMENTO RIUSCITO -----------------------------------------------------
+
+async def _mark_paid(session_id: str, payment_intent: Optional[str]):
+    """Segna come pagata la transazione e conferma la prenotazione (idempotente)."""
+    tx = await db.payment_transactions.find_one({'session_id': session_id}, {'_id': 0})
+    if not tx:
+        logging.error(f'Pagamento ricevuto per sessione sconosciuta {session_id}')
+        return
+    # aggiornamento atomico: solo il primo chiamante (webhook o polling) procede
+    res = await db.payment_transactions.update_one(
+        {'session_id': session_id, 'payment_status': {'$ne': 'paid'}},
+        {'$set': {'payment_status': 'paid', 'status': 'complete', 'payment_intent_id': payment_intent}},
+    )
+    if res.modified_count == 0:
+        return  # già gestito
+
+    choice = (tx.get('metadata') or {}).get('payment_choice', 'deposit')
+    update = {
+        'status': 'confirmed',
+        'payment_status': 'fully_paid' if choice == 'full' else 'deposit_paid',
+    }
+    if payment_intent:
+        update['payment_intent_id'] = payment_intent
+    r = await db.bookings.update_one({'id': tx['booking_id']}, {'$set': update})
     settings = await get_settings()
-    
+
+    if r.matched_count == 0:
+        # Non dovrebbe più succedere, ma se succede il gestore DEVE saperlo subito.
+        logging.critical(f"Pagamento incassato ma prenotazione {tx['booking_id']} assente (sessione {session_id})")
+        if ADMIN_NOTIFY_EMAIL:
+            asyncio.create_task(send_email_async(
+                ADMIN_NOTIFY_EMAIL,
+                '[Light Blue] ATTENZIONE: pagamento senza prenotazione',
+                f"<p>Stripe ha incassato la sessione <b>{session_id}</b> ma la prenotazione "
+                f"<b>{tx['booking_id']}</b> non esiste più. Verifica su Stripe e contatta l'ospite.</p>",
+            ))
+        return
+
+    booking = await db.bookings.find_one({'id': tx['booking_id']}, {'_id': 0})
     if booking:
         asyncio.create_task(send_email_async(
             booking['guest_email'],
-            f"Prenotazione confermata — {settings.get('villa_name','Light Blue')}",
+            f"Prenotazione confermata — {settings.get('villa_name', 'Light Blue')}",
             email_booking_confirmation_html(booking, settings),
         ))
 
-# --- ROUTES ---
+
+async def _expire_session(session_id: str) -> str:
+    """Chiude la pagina di pagamento Stripe. Ritorna lo stato finale ('expired', 'complete', ...)."""
+    try:
+        s = await asyncio.to_thread(stripe.checkout.Session.expire, session_id)
+        return _obj_get(s, 'status') or 'expired'
+    except Exception:
+        # già scaduta o già pagata: leggiamo lo stato reale
+        try:
+            s = await asyncio.to_thread(stripe.checkout.Session.retrieve, session_id)
+            if _obj_get(s, 'payment_status') == 'paid':
+                await _mark_paid(session_id, _obj_get(s, 'payment_intent'))
+                return 'complete'
+            return _obj_get(s, 'status') or 'unknown'
+        except Exception as e:
+            logging.error(f'Impossibile verificare la sessione Stripe {session_id}: {e}')
+            return 'unknown'
+
+
+async def _release_pending_booking(booking_id: str) -> bool:
+    """Elimina una prenotazione dal sito non pagata, dopo aver chiuso la sessione Stripe."""
+    tx = await db.payment_transactions.find_one({'booking_id': booking_id}, {'_id': 0})
+    if tx:
+        status = await _expire_session(tx['session_id'])
+        if status in ('complete', 'unknown'):
+            # pagata, oppure Stripe non raggiungibile: non cancelliamo nulla
+            return False
+    res = await db.bookings.delete_one({
+        'id': booking_id, 'status': 'pending', 'payment_status': 'unpaid', 'source': 'website',
+    })
+    if tx:
+        await db.payment_transactions.update_one(
+            {'session_id': tx['session_id']}, {'$set': {'status': 'expired'}}
+        )
+    return res.deleted_count > 0
+
+
+# --- CLEANUP ------------------------------------------------------------------
+
+async def cleanup_expired_bookings():
+    """
+    Rimuove le prenotazioni PENDING provenienti dal SITO abbandonate (sessione Stripe scaduta).
+    NON tocca le prenotazioni manuali o esterne.
+    """
+    try:
+        cutoff_iso = (datetime.now(timezone.utc) - timedelta(minutes=CLEANUP_AFTER_MINUTES)).isoformat()
+        expired = await db.bookings.find({
+            'status': 'pending',
+            'payment_status': 'unpaid',
+            'source': 'website',
+            'created_at': {'$lt': cutoff_iso},
+        }, {'_id': 0, 'id': 1}).to_list(length=100)
+        for b in expired:
+            if await _release_pending_booking(b['id']):
+                logging.info(f"Cleanup: rimossa prenotazione abbandonata {b['id']}")
+    except Exception as e:
+        logging.error(f"Cleanup Error: {e}")
+
+
+# --- ROUTES -------------------------------------------------------------------
 
 @router.post("/bookings/checkout")
 async def create_booking_checkout(payload: BookingCreate, request: Request, background_tasks: BackgroundTasks):
+    rate_limit(request, 'checkout', 10, 10 * 60)
     background_tasks.add_task(cleanup_expired_bookings)
 
-    if payload.check_in >= payload.check_out:
-        raise HTTPException(400, 'check_out must be after check_in')
     if not await dates_available(payload.check_in, payload.check_out):
         raise HTTPException(409, 'Date non disponibili')
 
     pricing = await compute_dual_pricing(payload.check_in, payload.check_out)
     settings = await get_settings()
-    
-    # Seleziona il prezzo corretto in base alla scelta is_refundable
-    if payload.is_refundable:
-        base_price = pricing['refundable_total']
-    else:
-        base_price = pricing['non_refundable_total']
-    
-    amount = base_price if payload.payment_choice == 'full' else round(base_price * settings.get('deposit_percent', 30.0) / 100.0, 2)
+    deposit_pct = settings.get('deposit_percent', 30.0)
+
+    base_price = pricing['refundable_total'] if payload.is_refundable else pricing['non_refundable_total']
+    deposit_amount = round(base_price * deposit_pct / 100.0, 2)
+    amount = base_price if payload.payment_choice == 'full' else deposit_amount
     amount_cents = int(round(amount * 100))
+    if amount_cents < 50:
+        raise HTTPException(400, 'Importo non valido')
 
     booking = Booking(
-        guest_name=payload.guest_name,
+        guest_name=payload.guest_name.strip(),
         guest_email=payload.guest_email,
         guest_phone=payload.guest_phone,
         check_in=payload.check_in,
@@ -115,7 +182,7 @@ async def create_booking_checkout(payload: BookingCreate, request: Request, back
         adults=payload.adults,
         children=payload.children,
         total_price=base_price,
-        deposit_amount=round(base_price * settings.get('deposit_percent', 30.0) / 100.0, 2),
+        deposit_amount=deposit_amount,
         payment_choice=payload.payment_choice,
         is_refundable=payload.is_refundable,
         status='pending',
@@ -123,17 +190,23 @@ async def create_booking_checkout(payload: BookingCreate, request: Request, back
         source='website',
         notes=payload.notes,
         consent_newsletter=payload.consent_newsletter,
+        terms_accepted_at=datetime.now(timezone.utc).isoformat(),
     )
     await db.bookings.insert_one(booking.model_dump())
 
-    if payload.consent_newsletter:
-        existing = await db.subscribers.find_one({'email': payload.guest_email})
-        if not existing:
-            sub = Subscriber(email=payload.guest_email, name=payload.guest_name, source='booking')
-            await db.subscribers.insert_one(sub.model_dump())
+    # Protezione da doppia prenotazione simultanea: se nel frattempo un'altra richiesta
+    # ha occupato le stesse date, vince la prima e questa viene annullata.
+    rivals = await db.bookings.find({
+        'id': {'$ne': booking.id},
+        'status': {'$in': ['pending', 'confirmed', 'external']},
+        'check_in': {'$lt': booking.check_out},
+        'check_out': {'$gt': booking.check_in},
+    }, {'_id': 0, 'created_at': 1}).to_list(10)
+    if any(r.get('created_at', '') <= booking.created_at for r in rivals):
+        await db.bookings.delete_one({'id': booking.id})
+        raise HTTPException(409, 'Date non disponibili')
 
-    host_url = payload.origin_url.rstrip('/')
-    
+    host_url = _return_base_url(payload.origin_url)
     try:
         session = await asyncio.to_thread(
             stripe.checkout.Session.create,
@@ -141,25 +214,26 @@ async def create_booking_checkout(payload: BookingCreate, request: Request, back
             line_items=[{
                 'price_data': {
                     'currency': 'eur',
-                    'product_data': {'name': f"Soggiorno presso {settings.get('villa_name','Light Blue')}"},
+                    'product_data': {'name': f"Soggiorno presso {settings.get('villa_name', 'Light Blue')}"},
                     'unit_amount': amount_cents,
                 },
                 'quantity': 1,
             }],
             mode='payment',
-            expires_at=int((datetime.now(timezone.utc) + timedelta(minutes=31)).timestamp()),
+            customer_email=payload.guest_email,
+            expires_at=int((datetime.now(timezone.utc) + timedelta(minutes=CHECKOUT_MINUTES, seconds=30)).timestamp()),
             success_url=f"{host_url}/payment/success?session_id={{CHECKOUT_SESSION_ID}}",
             cancel_url=f"{host_url}/payment/cancel?session_id={{CHECKOUT_SESSION_ID}}",
             metadata={
                 'booking_id': booking.id,
                 'payment_choice': payload.payment_choice,
-                'guest_email': payload.guest_email,
             },
         )
-    except Exception as e:
+    except Exception:
         logging.exception('Stripe session create failed')
         await db.bookings.delete_one({'id': booking.id})
-        raise HTTPException(500, f'Errore Stripe: {e}')
+        # il dettaglio tecnico resta nei log: all'ospite un messaggio generico
+        raise HTTPException(502, 'Il pagamento non è al momento disponibile. Riprova tra qualche minuto o contattaci.')
 
     tx = PaymentTransaction(
         session_id=session.id,
@@ -171,94 +245,93 @@ async def create_booking_checkout(payload: BookingCreate, request: Request, back
     )
     await db.payment_transactions.insert_one(tx.model_dump())
 
+    # newsletter solo dopo che la sessione di pagamento è stata creata
+    if payload.consent_newsletter:
+        existing = await db.subscribers.find_one({'email': payload.guest_email})
+        if not existing:
+            sub = Subscriber(email=payload.guest_email, name=payload.guest_name, source='booking')
+            await db.subscribers.insert_one(sub.model_dump())
+        # nuovo consenso esplicito: annulla un'eventuale disiscrizione precedente
+        await db.unsubscribed.delete_one({'email': payload.guest_email.lower()})
+
     return {'url': session.url, 'session_id': session.id, 'booking_id': booking.id, 'amount': amount}
 
 
 @router.delete("/bookings/checkout/{session_id}")
 async def cancel_booking_checkout(session_id: str):
     """
-    Chiamato dal frontend quando l'utente torna indietro da Stripe o chiude la pagina.
-    Libera immediatamente le date cancellando la prenotazione pending.
+    Chiamato dal frontend quando l'utente annulla il pagamento su Stripe.
+    Chiude la sessione Stripe (così non è più pagabile) e libera subito le date.
     """
-    tx = await db.payment_transactions.find_one({'session_id': session_id})
+    tx = await db.payment_transactions.find_one({'session_id': session_id}, {'_id': 0})
     if not tx:
         return {'cancelled': False, 'reason': 'transaction not found'}
-
-    booking = await db.bookings.find_one({'id': tx['booking_id']})
+    booking = await db.bookings.find_one({'id': tx['booking_id']}, {'_id': 0})
     if not booking:
-        await db.payment_transactions.delete_one({'session_id': session_id})
         return {'cancelled': False, 'reason': 'booking not found'}
-
-    # Protezione: cancelliamo solo pending non pagati dal sito
     if booking.get('status') != 'pending' or booking.get('payment_status') != 'unpaid':
         return {'cancelled': False, 'reason': 'booking already processed'}
-
     if booking.get('source') != 'website':
         return {'cancelled': False, 'reason': 'not a website booking'}
 
-    await db.bookings.delete_one({'id': tx['booking_id']})
-    await db.payment_transactions.delete_one({'session_id': session_id})
-    logging.info(f"Cancel checkout: rimossa prenotazione {tx['booking_id']} (session {session_id})")
-    return {'cancelled': True}
+    if await _release_pending_booking(tx['booking_id']):
+        logging.info(f"Cancel checkout: rimossa prenotazione {tx['booking_id']} (session {session_id})")
+        return {'cancelled': True}
+    return {'cancelled': False, 'reason': 'payment in progress or completed'}
 
 
 @router.get("/payments/status/{session_id}")
 async def payment_status(session_id: str):
     tx = await db.payment_transactions.find_one({'session_id': session_id}, {'_id': 0})
-    if not tx: raise HTTPException(404, 'Transaction not found')
-    if tx.get('payment_status') == 'paid': return tx
+    if not tx:
+        raise HTTPException(404, 'Transaction not found')
+    if tx.get('payment_status') == 'paid':
+        return {'payment_status': 'paid', 'status': 'complete', 'booking_id': tx.get('booking_id')}
 
     try:
         session = await asyncio.to_thread(stripe.checkout.Session.retrieve, session_id)
-        p_status = 'paid' if session.payment_status == 'paid' else 'unpaid'
-        status = session.status
-    except:
-        return tx
+    except Exception as e:
+        logging.warning(f'Payment status check failed for {session_id}: {e}')
+        return {'payment_status': tx.get('payment_status'), 'status': tx.get('status'), 'booking_id': tx.get('booking_id')}
 
-    await db.payment_transactions.update_one({'session_id': session_id}, {'$set': {'status': status, 'payment_status': p_status}})
-    if p_status == 'paid' and tx.get('payment_status') != 'paid':
-        await _on_payment_paid(session_id, tx.get('metadata', {}).get('payment_choice', 'deposit'), tx.get('booking_id'))
-
-    return {'payment_status': p_status, 'status': status, 'booking_id': tx.get('booking_id')}
+    paid = _obj_get(session, 'payment_status') == 'paid'
+    status = _obj_get(session, 'status')
+    if paid:
+        await _mark_paid(session_id, _obj_get(session, 'payment_intent'))
+    else:
+        await db.payment_transactions.update_one({'session_id': session_id}, {'$set': {'status': status}})
+    return {'payment_status': 'paid' if paid else 'unpaid', 'status': status, 'booking_id': tx.get('booking_id')}
 
 
 @router.post("/webhook/stripe")
 async def stripe_webhook(request: Request):
+    if not STRIPE_WEBHOOK_SECRET:
+        # Senza segreto non possiamo verificare che la richiesta arrivi davvero da Stripe.
+        logging.error('Webhook Stripe ricevuto ma STRIPE_WEBHOOK_SECRET non è configurato: ignorato')
+        raise HTTPException(503, 'Webhook non configurato')
+
     body = await request.body()
     sig = request.headers.get('Stripe-Signature', '')
     try:
-        if STRIPE_WEBHOOK_SECRET:
-            event = stripe.Webhook.construct_event(body, sig, STRIPE_WEBHOOK_SECRET)
-            etype, data = event.type, event.data.object
-        else:
-            event = _json.loads(body)
-            etype, data = event['type'], event['data']['object']
-        
+        event = stripe.Webhook.construct_event(body, sig, STRIPE_WEBHOOK_SECRET)
+    except Exception:
+        raise HTTPException(400, 'Firma webhook non valida')
+
+    etype, data = event.type, event.data.object
+    try:
         if etype in ('checkout.session.completed', 'checkout.session.async_payment_succeeded'):
-            session_id = getattr(data, 'id', None) or data.get('id')
-            tx = await db.payment_transactions.find_one({'session_id': session_id})
-            if tx and tx.get('payment_status') != 'paid':
-                pi = getattr(data, 'payment_intent', None) or data.get('payment_intent')
-                await db.payment_transactions.update_one({'session_id': session_id}, {'$set': {'payment_status': 'paid', 'status': 'complete', 'payment_intent_id': pi}})
-                choice = tx.get('metadata', {}).get('payment_choice', 'deposit')
-                await db.bookings.update_one({'id': tx['booking_id']}, {'$set': {'status': 'confirmed', 'payment_status': 'fully_paid' if choice == 'full' else 'deposit_paid', 'payment_intent_id': pi}})
-                
-                booking = await db.bookings.find_one({'id': tx['booking_id']})
-                settings = await get_settings()
-                if booking:
-                    asyncio.create_task(send_email_async(booking['guest_email'], f"Prenotazione confermata — {settings.get('villa_name','Light Blue')}", email_booking_confirmation_html(booking, settings)))
-
+            if _obj_get(data, 'payment_status') == 'paid':
+                await _mark_paid(_obj_get(data, 'id'), _obj_get(data, 'payment_intent'))
         elif etype == 'checkout.session.expired':
-            session_id = getattr(data, 'id', None) or data.get('id')
-            tx = await db.payment_transactions.find_one({'session_id': session_id})
+            tx = await db.payment_transactions.find_one({'session_id': _obj_get(data, 'id')}, {'_id': 0})
             if tx:
-                # Cancelliamo solo se è fonte website (doppia sicurezza)
-                booking = await db.bookings.find_one({'id': tx['booking_id']})
-                if booking and booking.get('source') == 'website':
-                    await db.bookings.delete_one({'id': tx['booking_id']})
-                await db.payment_transactions.update_one({'session_id': session_id}, {'$set': {'status': 'expired'}})
-
-        return {'received': True}
-    except Exception as e:
-        logging.exception('Stripe webhook error')
-        raise HTTPException(400, f"Webhook Error: {str(e)}")
+                await db.bookings.delete_one({
+                    'id': tx['booking_id'], 'status': 'pending', 'payment_status': 'unpaid', 'source': 'website',
+                })
+                await db.payment_transactions.update_one(
+                    {'session_id': tx['session_id']}, {'$set': {'status': 'expired'}}
+                )
+    except Exception:
+        logging.exception('Stripe webhook processing error')
+        raise HTTPException(500, 'Errore elaborazione webhook')  # Stripe ritenterà
+    return {'received': True}

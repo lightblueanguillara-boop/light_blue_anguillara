@@ -1,4 +1,5 @@
 """Operations: analytics, settings, iCal sync, and Image management."""
+import asyncio
 import os
 import logging
 from datetime import datetime, timezone, timedelta
@@ -14,6 +15,7 @@ from ical_service import ical_sync_run
 from models import SettingsUpdate, GalleryImage, GalleryImageUpdate
 
 router = APIRouter()
+MAX_UPLOAD_BYTES = 15 * 1024 * 1024
 
 # Configurazione Cloudinary
 cloudinary.config(
@@ -222,10 +224,19 @@ async def upload_gallery_image(
     caption: Optional[str] = Form(""),
     admin=Depends(get_current_admin)
 ):
+    if category not in ('gallery', 'home', 'rooms', 'general'):
+        raise HTTPException(400, 'Categoria non valida')
+    if (file.content_type or '') not in ('image/jpeg', 'image/png', 'image/webp', 'image/avif'):
+        raise HTTPException(400, 'Sono ammesse solo immagini JPG, PNG, WEBP o AVIF')
+    data = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, 'Immagine troppo grande (massimo 15 MB)')
     try:
-        upload_result = cloudinary.uploader.upload(
-            file.file,
-            folder="light_blue_gallery"
+        upload_result = await asyncio.to_thread(
+            cloudinary.uploader.upload,
+            data,
+            folder="light_blue_gallery",
+            resource_type="image",
         )
 
         new_image = GalleryImage(
@@ -240,8 +251,9 @@ async def upload_gallery_image(
 
         return new_image
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logging.exception('Upload Cloudinary fallito')
+        raise HTTPException(status_code=502, detail='Caricamento immagine non riuscito')
 
 @router.patch("/admin/gallery/{image_id}", response_model=GalleryImage)
 async def update_image_info(
@@ -274,7 +286,7 @@ async def delete_gallery_image(
         raise HTTPException(404, "Immagine non trovata")
 
     try:
-        cloudinary.uploader.destroy(image['public_id'])
+        await asyncio.to_thread(cloudinary.uploader.destroy, image['public_id'])
 
         await db.gallery.delete_one({"id": image_id})
 
@@ -283,5 +295,6 @@ async def delete_gallery_image(
             "message": "Eliminata correttamente"
         }
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logging.exception('Eliminazione Cloudinary fallita')
+        raise HTTPException(status_code=502, detail='Eliminazione immagine non riuscita')

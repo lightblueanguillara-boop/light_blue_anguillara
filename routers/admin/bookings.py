@@ -4,7 +4,6 @@ import logging
 import uuid
 import urllib.parse
 from datetime import datetime, timezone
-from typing import Optional
 
 import stripe
 from fastapi import APIRouter, Depends, HTTPException
@@ -19,7 +18,7 @@ from email_helpers import (
     email_modification_confirmation_html,
     _it_date
 )
-from models import Booking, BookingUpdate, RefundRequest
+from models import BookingUpdate, RefundRequest, _validate_iso_date
 from pricing import compute_refund_amount
 
 router = APIRouter()
@@ -54,6 +53,13 @@ async def create_manual_booking(payload: dict, admin=Depends(get_current_admin))
 
         if not check_in or not check_out:
             raise HTTPException(400, "Date check-in e check-out mancanti")
+        try:
+            _validate_iso_date(check_in)
+            _validate_iso_date(check_out)
+        except ValueError:
+            raise HTTPException(400, "Date non valide (formato AAAA-MM-GG)")
+        if check_out <= check_in:
+            raise HTTPException(400, "La data di partenza deve essere successiva a quella di arrivo")
 
         # Controllo sovrapposizione date per nuove prenotazioni manuali
         existing_overlap = await db.bookings.find_one({
@@ -156,7 +162,10 @@ async def update_booking(booking_id: str, updates: BookingUpdate, admin=Depends(
     if not updated_booking and decoded_id != booking_id:
         updated_booking = await db.bookings.find_one({'id': booking_id}, {'_id': 0})
 
-    if updated_booking and updated_booking.get('status') != 'cancelled':
+    # L'email all'ospite parte solo se cambiano dati che lo riguardano (non per stato/pagamento)
+    guest_relevant = {'check_in', 'check_out', 'guest_name', 'guest_email', 'is_refundable'}
+    changed = current_b and any(k in patch and patch[k] != current_b.get(k) for k in guest_relevant)
+    if updated_booking and changed and updated_booking.get('status') != 'cancelled':
         guest_email = updated_booking.get('guest_email', '').strip()
         is_placeholder = not guest_email or guest_email in ('', 'manual@booking.com')
         if not is_placeholder:

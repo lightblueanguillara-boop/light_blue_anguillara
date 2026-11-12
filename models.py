@@ -1,7 +1,10 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import List, Optional, Literal
-from pydantic import BaseModel, Field, EmailStr, field_validator
+from pydantic import BaseModel, Field, EmailStr, field_validator, model_validator
 import uuid
+
+MAX_STAY_NIGHTS = 60          # soggiorno massimo prenotabile online
+MAX_BOOKING_AHEAD_DAYS = 730  # prenotabile fino a 2 anni in anticipo
 
 def _validate_iso_date(v: Optional[str]) -> Optional[str]:
     if v is None:
@@ -12,9 +15,29 @@ def _validate_iso_date(v: Optional[str]) -> Optional[str]:
     except (ValueError, TypeError):
         raise ValueError('Date must be in YYYY-MM-DD format')
 
+def validate_stay(check_in: str, check_out: str, allow_past: bool = False) -> None:
+    """Controlli comuni su un intervallo di soggiorno (date ISO già validate)."""
+    ci = datetime.strptime(check_in, '%Y-%m-%d').date()
+    co = datetime.strptime(check_out, '%Y-%m-%d').date()
+    if co <= ci:
+        raise ValueError('La data di partenza deve essere successiva a quella di arrivo')
+    if (co - ci).days > MAX_STAY_NIGHTS:
+        raise ValueError(f'Soggiorno massimo prenotabile online: {MAX_STAY_NIGHTS} notti')
+    today = date.today()
+    if not allow_past and ci < today:
+        raise ValueError('La data di arrivo non può essere nel passato')
+    if (ci - today).days > MAX_BOOKING_AHEAD_DAYS:
+        raise ValueError('Data di arrivo troppo lontana nel tempo')
+
+
 class AdminLogin(BaseModel):
     email: EmailStr
-    password: str
+    password: str = Field(max_length=200)
+
+
+class PasswordChange(BaseModel):
+    current_password: str = Field(max_length=200)
+    new_password: str = Field(min_length=12, max_length=200)
 
 class Booking(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -37,21 +60,35 @@ class Booking(BaseModel):
     payment_intent_id: Optional[str] = None
     refund_amount: Optional[float] = None
     last_reminder_at: Optional[str] = None
+    terms_accepted_at: Optional[str] = None
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 class BookingCreate(BaseModel):
-    guest_name: str
+    guest_name: str = Field(min_length=2, max_length=120)
     guest_email: EmailStr
-    guest_phone: Optional[str] = None
+    guest_phone: Optional[str] = Field(default=None, max_length=40)
     check_in: str
     check_out: str
-    adults: int = 2
-    children: int = 0
+    adults: int = Field(default=2, ge=1, le=10)
+    children: int = Field(default=0, ge=0, le=10)
     payment_choice: Literal['deposit', 'full'] = 'deposit'
     is_refundable: bool = True
-    notes: Optional[str] = None
+    notes: Optional[str] = Field(default=None, max_length=2000)
     consent_newsletter: bool = False
-    origin_url: str
+    accept_terms: bool = False
+    origin_url: str = Field(default='', max_length=300)
+
+    @field_validator('check_in', 'check_out')
+    @classmethod
+    def _date_format(cls, v):
+        return _validate_iso_date(v)
+
+    @model_validator(mode='after')
+    def _check_stay(self):
+        validate_stay(self.check_in, self.check_out)
+        if not self.accept_terms:
+            raise ValueError('È necessario accettare le Condizioni di prenotazione')
+        return self
 
 class BookingUpdate(BaseModel):
     status: Optional[Literal['pending', 'confirmed', 'cancelled', 'external']] = None
@@ -80,12 +117,13 @@ class ContactMessage(BaseModel):
     replies: List[dict] = Field(default_factory=list)
 
 class ContactCreate(BaseModel):
-    name: str
+    name: str = Field(min_length=2, max_length=120)
     email: EmailStr
-    phone: Optional[str] = None
-    subject: Optional[str] = None
-    message: str
+    phone: Optional[str] = Field(default=None, max_length=40)
+    subject: Optional[str] = Field(default=None, max_length=200)
+    message: str = Field(min_length=2, max_length=5000)
     consent_newsletter: bool = False
+    website: Optional[str] = Field(default=None, max_length=200)  # campo trappola anti-bot
 
 # Usato da inbox.py per aggiornare lo stato di un messaggio (new/read/replied)
 class MessageUpdate(BaseModel):
@@ -128,12 +166,17 @@ class VillaSettings(BaseModel):
     last_minute_discount_percent: float = 15.0
     last_minute_title: str = 'Last Minute'
     last_minute_subtitle: str = 'Sconto prossime date'
+    # Dati legali (Informativa privacy, Condizioni di prenotazione, footer)
+    legal_owner_name: str = ''
+    legal_owner_tax_id: str = ''
+    legal_owner_address: str = ''
+    tourist_tax_note: str = ''
 
 # Usato da operations.py per aggiornare le impostazioni globali della villa
 class SettingsUpdate(BaseModel):
-    default_price_per_night: Optional[float] = None
-    deposit_percent: Optional[float] = None
-    non_refundable_discount_percent: Optional[float] = None
+    default_price_per_night: Optional[float] = Field(default=None, gt=0, le=100000)
+    deposit_percent: Optional[float] = Field(default=None, ge=0, le=100)
+    non_refundable_discount_percent: Optional[float] = Field(default=None, ge=0, le=90)
     ical_airbnb_url: Optional[str] = None
     ical_booking_url: Optional[str] = None
     villa_name: Optional[str] = None
@@ -145,10 +188,14 @@ class SettingsUpdate(BaseModel):
     villa_description: Optional[str] = None
     seasonal_rates: Optional[List[SeasonalRate]] = None
     last_minute_enabled: Optional[bool] = None
-    last_minute_window_days: Optional[int] = None
-    last_minute_discount_percent: Optional[float] = None
+    last_minute_window_days: Optional[int] = Field(default=None, ge=1, le=90)
+    last_minute_discount_percent: Optional[float] = Field(default=None, ge=0, le=90)
     last_minute_title: Optional[str] = None
     last_minute_subtitle: Optional[str] = None
+    legal_owner_name: Optional[str] = Field(default=None, max_length=200)
+    legal_owner_tax_id: Optional[str] = Field(default=None, max_length=40)
+    legal_owner_address: Optional[str] = Field(default=None, max_length=300)
+    tourist_tax_note: Optional[str] = Field(default=None, max_length=1000)
 
 class GalleryImage(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))

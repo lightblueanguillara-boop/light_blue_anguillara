@@ -3,10 +3,9 @@ import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
-import resend
 from fastapi import APIRouter, Depends, HTTPException
-from auth import get_current_admin
-from db import db, SENDER_EMAIL
+from auth import get_current_admin, newsletter_token
+from db import db, SENDER_EMAIL, FRONTEND_URL, RESEND_API_KEY, get_settings
 from models import MarketingEmail
 
 router = APIRouter()
@@ -34,47 +33,53 @@ async def send_marketing(payload: MarketingEmail, admin=Depends(get_current_admi
     FIX: non viene mai interrogato il DB degli iscritti per allargare
     la lista — si usano SOLO le email passate esplicitamente.
     """
-    from db import RESEND_API_KEY
     import resend as _resend
     _resend.api_key = RESEND_API_KEY
 
-    # ---------------------------------------------------------------
-    # FIX: usiamo esclusivamente la lista passata dal frontend.
-    # La convertiamo in lista di stringhe pure per sicurezza
-    # (EmailStr di pydantic è già validato, ma lo normalizziamo).
-    # ---------------------------------------------------------------
-    target_emails = [str(e).lower().strip() for e in payload.recipients]
+    requested = list(dict.fromkeys(str(e).lower().strip() for e in payload.recipients))
+    if not requested:
+        raise HTTPException(status_code=400, detail="Nessun destinatario selezionato nella lista di invio.")
+
+    # GDPR / ePrivacy: le email promozionali possono andare SOLO a chi ha dato il consenso
+    # (iscritti presenti nel CRM) e mai a chi si è disiscritto.
+    subs = await db.subscribers.find({}, {'_id': 0, 'email': 1}).to_list(100000)
+    subscribed = {s['email'].lower() for s in subs}
+    unsub = {u['email'].lower() for u in await db.unsubscribed.find({}, {'_id': 0, 'email': 1}).to_list(100000)}
+    target_emails = [e for e in requested if e in subscribed and e not in unsub]
+    skipped = [e for e in requested if e not in target_emails]
 
     if not target_emails:
-        raise HTTPException(
-            status_code=400,
-            detail="Nessun destinatario selezionato nella lista di invio."
-        )
+        raise HTTPException(400, "Nessuno dei destinatari selezionati risulta iscritto alla newsletter.")
 
-    logging.info(
-        f"Marketing send avviato: {len(target_emails)} destinatari selezionati — "
-        f"{target_emails[:5]}{'...' if len(target_emails) > 5 else ''}"
-    )
+    logging.info(f"Marketing send avviato: {len(target_emails)} destinatari (esclusi {len(skipped)} non iscritti)")
 
+    settings = await get_settings()
+    villa = settings.get('villa_name', 'Light Blue')
     sent, failed, errors = 0, 0, []
 
-    # Invio uno per uno per gestire gli errori singolarmente
+    # Invio uno per uno: ogni email ha il proprio link di disiscrizione
     for email_addr in target_emails:
+        unsub_url = f"{FRONTEND_URL}/disiscrizione?token={newsletter_token(email_addr)}"
+        footer = (
+            '<div style="font-family:Arial,sans-serif;font-size:12px;color:#888;margin-top:32px;'
+            'padding-top:16px;border-top:1px solid #eee;text-align:center">'
+            f'Ricevi questa email perché ti sei iscritto alle comunicazioni di {villa}.<br/>'
+            f'<a href="{unsub_url}" style="color:#888">Disiscriviti</a> in qualsiasi momento.</div>'
+        )
         try:
             params = {
                 'from': SENDER_EMAIL,
-                'to': [email_addr],           # sempre una sola email per invio
+                'to': [email_addr],
                 'subject': payload.subject,
-                'html': payload.html_content,
+                'html': payload.html_content + footer,
+                'headers': {'List-Unsubscribe': f'<{unsub_url}>'},
             }
             await asyncio.to_thread(_resend.Emails.send, params)
             sent += 1
-            logging.info(f"Marketing: email inviata a {email_addr}")
         except Exception as e:
             failed += 1
-            err_msg = f"Fallito invio a {email_addr}: {str(e)}"
-            errors.append(err_msg)
-            logging.warning(err_msg)
+            errors.append(f"Fallito invio a {email_addr}: {str(e)[:200]}")
+            logging.warning(errors[-1])
 
     # Log nello storico
     log_doc = {
@@ -85,6 +90,7 @@ async def send_marketing(payload: MarketingEmail, admin=Depends(get_current_admi
         'failed_count': failed,
         'total': len(target_emails),
         'recipients_list': target_emails,
+        'skipped_not_subscribed': skipped,
         'created_at': datetime.now(timezone.utc).isoformat(),
     }
 
@@ -96,6 +102,7 @@ async def send_marketing(payload: MarketingEmail, admin=Depends(get_current_admi
         'sent': sent,
         'failed': failed,
         'total': len(target_emails),
+        'skipped': len(skipped),
         'errors': errors[:5]
     }
 

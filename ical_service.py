@@ -2,13 +2,12 @@
 import asyncio
 import logging
 import uuid
-from datetime import datetime, date, timezone
+from datetime import datetime, timezone
 
 import requests
 from icalendar import Calendar
 
 from db import db, get_settings
-from models import Booking
 
 async def ical_sync_run():
     s = await get_settings()
@@ -18,6 +17,8 @@ async def ical_sync_run():
     ]
     imported = 0
     new_external_ids = []
+    synced_sources = []   # piattaforme scaricate con successo
+    errors = []
 
     for src, url in urls:
         if not url:
@@ -28,9 +29,11 @@ async def ical_sync_run():
             
             if r.status_code != 200:
                 logging.error(f"Errore download iCal {src}: Status {r.status_code}")
+                errors.append(f"{src}: HTTP {r.status_code}")
                 continue
 
             cal = Calendar.from_ical(r.content)
+            synced_sources.append(src)
             for comp in cal.walk():
                 if comp.name == 'VEVENT':
                     try:
@@ -86,11 +89,17 @@ async def ical_sync_run():
 
         except Exception as e:
             logging.exception(f'Errore critico durante sync iCal per {src}: {e}')
+            errors.append(f"{src}: {type(e).__name__}")
+            if src in synced_sources:
+                synced_sources.remove(src)
 
-    # Pulizia: eliminiamo solo le vecchie prenotazioni esterne non più presenti nel file
-    if imported > 0 or any(url for _, url in urls):
+    # Pulizia: eliminiamo le prenotazioni esterne non più presenti nel calendario,
+    # SOLO per le piattaforme scaricate correttamente. Se un download fallisce
+    # (Airbnb/Booking irraggiungibili) le date restano bloccate: meglio una data
+    # bloccata in più che una doppia prenotazione.
+    if synced_sources:
         await db.bookings.delete_many({
-            'source': {'$in': ['airbnb', 'booking']}, 
+            'source': {'$in': synced_sources},
             'status': 'external',
             'id': {'$nin': new_external_ids}
         })
@@ -101,8 +110,9 @@ async def ical_sync_run():
         {'$set': {
             'last_ical_sync_at': datetime.now(timezone.utc).isoformat(),
             'last_ical_sync_count': imported,
+            'last_ical_sync_errors': errors,
         }},
     )
     
-    logging.info(f"Sincronizzazione completata con successo: {imported} eventi.")
-    return {'imported': imported, 'at': datetime.now(timezone.utc).isoformat()}
+    logging.info(f"Sincronizzazione iCal completata: {imported} eventi, errori: {errors or 'nessuno'}")
+    return {'imported': imported, 'errors': errors, 'at': datetime.now(timezone.utc).isoformat()}
