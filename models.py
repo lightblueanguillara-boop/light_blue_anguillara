@@ -37,7 +37,7 @@ class AdminLogin(BaseModel):
 
 class PasswordChange(BaseModel):
     current_password: str = Field(max_length=200)
-    new_password: str = Field(min_length=12, max_length=200)
+    new_password: str = Field(min_length=10, max_length=200)
 
 class Booking(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
