@@ -7,6 +7,7 @@ import asyncio
 import logging
 import os
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from dotenv import load_dotenv
@@ -34,8 +35,19 @@ logger = logging.getLogger(__name__)
 
 # La documentazione interattiva (/docs) è disattivata in produzione: ENABLE_DOCS=1 per attivarla.
 _docs = os.environ.get('ENABLE_DOCS') == '1'
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    await on_startup()
+    yield
+    from db import client
+    client.close()
+
+
 app = FastAPI(
     title="Light Blue - Anguillara Sabazia",
+    lifespan=lifespan,
     docs_url='/docs' if _docs else None,
     redoc_url=None,
     openapi_url='/openapi.json' if _docs else None,
@@ -83,7 +95,6 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
     return JSONResponse(status_code=422, content={'detail': msg})
 
 
-@app.on_event("startup")
 async def on_startup():
     # Seed admin (solo se non esiste ancora: per cambiare password usare il pannello)
     seed_email = os.environ.get('ADMIN_SEED_EMAIL')
@@ -127,9 +138,3 @@ async def _cleanup_scheduler_loop():
         except Exception as e:
             logging.exception(f'Cleanup scheduler failed: {e}')
         await asyncio.sleep(5 * 60)  # ogni 5 minuti
-
-
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    from db import client
-    client.close()
