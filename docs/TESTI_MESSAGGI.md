@@ -1,4 +1,4 @@
-# Testi dei messaggi — proposta da approvare
+# Testi dei messaggi — approvati il 2026-11-15
 
 Stile deciso: **plurale informale** ("noi" verso l'ospite, a cui diamo del tu), firma **Light Blue Anguillara**.
 Questi sono i testi **di partenza**: dopo la fase 1 il proprietario potrà cambiarli dal pannello
