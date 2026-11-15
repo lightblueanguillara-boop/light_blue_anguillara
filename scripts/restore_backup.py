@@ -14,7 +14,7 @@ from pathlib import Path
 from pymongo import MongoClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from backup import read_backup  # noqa: E402
+from backup_format import read_backup  # noqa: E402  (non richiede le variabili del server)
 
 
 def restore(data: bytes, database, replace: bool = False) -> dict:
@@ -45,7 +45,11 @@ def main() -> int:
     a = ap.parse_args()
 
     data = Path(a.file).read_bytes()
-    meta = read_backup(data)['meta']
+    try:
+        meta = read_backup(data)['meta']
+    except ValueError as e:
+        print(f'Fermato: {e}')
+        return 1
     print(f"Backup del {meta['created_at']} — {sum(meta['counts'].values())} documenti")
     for name, n in meta['counts'].items():
         print(f'  {name}: {n}')

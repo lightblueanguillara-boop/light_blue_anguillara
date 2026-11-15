@@ -142,3 +142,27 @@ def test_backup_frequency_validation(client, auth):
     assert client.put('/api/admin/settings', headers=auth, json={'backup_email_frequency': 'hourly'}).status_code == 422
     r = client.put('/api/admin/settings', headers=auth, json={'backup_email_frequency': 'daily'})
     assert r.status_code == 200 and r.json()['backup_email_frequency'] == 'daily'
+
+
+def test_restore_script_works_without_server_settings(client, auth, mongo, restore_db, tmp_path):
+    """In un'emergenza si ha solo il file: il ripristino non deve chiedere JWT_SECRET & co."""
+    import subprocess
+    import sys
+    from pathlib import Path
+    _seed(mongo)
+    f = tmp_path / 'backup.json.gz'
+    f.write_bytes(client.get('/api/admin/backup', headers=auth).content)
+    script = Path(__file__).resolve().parents[1] / 'scripts' / 'restore_backup.py'
+    run = lambda *extra: subprocess.run(
+        [sys.executable, str(script), str(f), '--mongo-url', os.environ['MONGO_URL'], '--db', restore_db.name, *extra],
+        capture_output=True, text=True, env={'PATH': os.environ.get('PATH', '')}, timeout=60)
+    first = run()
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert restore_db.bookings.count_documents({}) == 1
+    second = run()                                         # non sovrascrive
+    assert second.returncode == 1 and 'Fermato' in second.stdout
+    bad = tmp_path / 'altro.gz'
+    bad.write_bytes(b'non sono un backup')
+    out = subprocess.run([sys.executable, str(script), str(bad), '--mongo-url', 'mongodb://x', '--db', 'x'],
+                         capture_output=True, text=True, env={'PATH': os.environ.get('PATH', '')}, timeout=60)
+    assert out.returncode == 1 and 'non è un file di backup' in out.stdout and 'Traceback' not in out.stderr

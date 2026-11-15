@@ -16,10 +16,9 @@ from zoneinfo import ZoneInfo
 
 from bson import json_util
 
+from backup_format import FORMAT, VERSION, read_backup  # noqa: F401  (read_backup riesportata)
 from db import db, get_settings, ADMIN_NOTIFY_EMAIL
 
-FORMAT = 'light-blue-backup'
-VERSION = 1
 # coda temporanea delle notifiche notturne: non serve ripristinarla
 EXCLUDED = {'push_outbox'}
 # oltre questa dimensione l'email parte senza allegato (limite Resend: 40 MB)
@@ -54,17 +53,6 @@ async def build_backup() -> tuple[bytes, dict]:
                           json_options=json_util.CANONICAL_JSON_OPTIONS).encode()
     data = await asyncio.to_thread(gzip.compress, raw, 9)
     return data, meta
-
-
-def read_backup(data: bytes) -> dict:
-    """Legge e controlla un file di backup (usato dal ripristino)."""
-    doc = json_util.loads(gzip.decompress(data).decode())
-    meta = doc.get('meta') or {}
-    if meta.get('format') != FORMAT or not isinstance(doc.get('collections'), dict):
-        raise ValueError('Questo non è un file di backup di Light Blue')
-    if int(meta.get('version', 0)) > VERSION:
-        raise ValueError('Backup creato da una versione più recente del programma')
-    return doc
 
 
 def _summary_html(meta: dict, size: int, attached: bool) -> str:
