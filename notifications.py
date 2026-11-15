@@ -8,6 +8,7 @@ Tipi di notifica (decisi con il proprietario):
   D  promemoria            10 arrivo domani (18:00), 11 partenza oggi (8:00)
   E  sicurezza e problemi  12 pagamento da verificare, 13 email non consegnata, 14 nuovo accesso,
                            15 pagamento su prenotazione chiusa (cancellata/rifiutata/scaduta)
+  D (anche)               16 WhatsApp ancora da inviare agli ospiti (la sera)
 Regole: niente emoji o simboli nei testi; ogni notifica apre la pagina/scheda giusta;
 gruppo E sempre attivo; silenzio notturno (le urgenti 12 e 14 arrivano comunque).
 """
@@ -29,7 +30,7 @@ GROUP_OF = {
     'new_request': 'A', 'request_expiring': 'A', 'request_expired': 'A', 'booking_confirmed': 'A', 'payment_expired': 'A',
     'external_new': 'B', 'external_removed': 'B', 'ical_failing': 'B',
     'new_message': 'C',
-    'arrival_tomorrow': 'D', 'departure_today': 'D',
+    'arrival_tomorrow': 'D', 'departure_today': 'D', 'whatsapp_pending': 'D',
     'payment_orphan': 'E', 'email_failed': 'E', 'new_login': 'E', 'payment_on_closed': 'E',
 }
 URGENT = {'payment_orphan', 'new_login', 'payment_on_closed'}   # arrivano anche durante il silenzio notturno
@@ -178,6 +179,12 @@ def build(kind: str, ctx: dict) -> dict:
         return dict(title='Pagamento da verificare',
                     body=f"Stripe ha incassato {euro(ctx.get('amount'))} ma la prenotazione non risulta. Controlla subito su Stripe.",
                     discreet='Un pagamento richiede una verifica urgente.', url='/admin/bookings')
+    if kind == 'whatsapp_pending':
+        n = int(ctx.get('count') or 0)
+        return dict(title='WhatsApp da inviare',
+                    body='Hai 1 messaggio WhatsApp da inviare a un ospite.' if n == 1 else
+                         f'Hai {n} messaggi WhatsApp da inviare agli ospiti.',
+                    discreet='Ci sono messaggi WhatsApp da inviare.', url='/admin/whatsapp')
     if kind == 'payment_on_closed':
         b = ctx['booking']
         return dict(title='Pagamento su prenotazione chiusa',

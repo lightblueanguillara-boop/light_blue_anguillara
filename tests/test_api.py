@@ -378,7 +378,7 @@ def test_manual_booking_flow(client, auth, sent_emails):
     # cambio date: email all'ospite
     client.patch(f'/api/admin/bookings/{bid}', headers=auth, json={'check_out': d(104)})
     assert wait_for(lambda: len(sent_emails) == 2)
-    assert 'Modifica' in sent_emails[-1]['subject']
+    assert 'aggiornata' in sent_emails[-1]['subject']
 
     assert client.patch(f'/api/admin/bookings/{bid}', headers=auth, json={'check_in': '01/01/2027'}).status_code == 422
     assert client.delete(f'/api/admin/bookings/{bid}', headers=auth).json()['archived'] is True

@@ -224,3 +224,18 @@ def test_empty_calendar_alert_after_one_hour(client, mongo, auth, monkeypatch, p
     monkeypatch.setattr(requests, 'get', lambda url, timeout=15: _Resp(200, EMPTY_ICS))
     client.post('/api/admin/ical/sync', headers=auth)
     assert wait_for(lambda: any(p['kind'] == 'ical_failing' for p in pushes))
+
+
+# ------------------------------------------------------------ impostazioni: mai documenti doppi
+def test_settings_duplicates_are_cleaned_and_prevented(client, mongo):
+    from pymongo.errors import DuplicateKeyError
+    from db import ensure_settings_unique
+    client.get('/api/villa/info')                                   # crea le impostazioni
+    first = mongo.settings.find_one({'id': 'global'})
+    mongo.settings.drop_index('id_1')
+    mongo.settings.insert_one({'id': 'global', 'booking_mode': 'instant'})   # copia doppia "storica"
+    client.portal.call(ensure_settings_unique)
+    docs = list(mongo.settings.find({'id': 'global'}))
+    assert len(docs) == 1 and docs[0]['_id'] == first['_id']        # resta quella già in uso
+    with pytest.raises(DuplicateKeyError):
+        mongo.settings.insert_one({'id': 'global'})

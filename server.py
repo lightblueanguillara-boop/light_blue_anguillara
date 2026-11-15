@@ -25,8 +25,10 @@ from routers.admin import router as admin_router  # noqa: E402
 from routers.payments import router as payments_router, cleanup_expired_bookings  # noqa: E402
 from routers.booking_requests import router as requests_router, expire_requests  # noqa: E402
 from routers.brand import router as brand_router  # noqa: E402
+from routers.resend_webhook import router as resend_webhook_router  # noqa: E402
 from notifications import run_scheduled  # noqa: E402
 from backup import run_scheduled_backup  # noqa: E402
+import guest_reminders  # noqa: E402
 from routers.public import router as public_router  # noqa: E402
 
 logging.basicConfig(
@@ -59,6 +61,7 @@ api_router.include_router(public_router)
 api_router.include_router(payments_router)
 api_router.include_router(requests_router)
 api_router.include_router(brand_router)
+api_router.include_router(resend_webhook_router)
 api_router.include_router(admin_router)
 app.include_router(api_router)
 
@@ -97,6 +100,8 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
 
 
 async def on_startup():
+    from db import ensure_settings_unique
+    await ensure_settings_unique()
     # Seed admin (solo se non esiste ancora: per cambiare password usare il pannello)
     seed_email = os.environ.get('ADMIN_SEED_EMAIL')
     seed_pwd = os.environ.get('ADMIN_SEED_PASSWORD')
@@ -111,6 +116,14 @@ async def on_startup():
                 'created_at': datetime.now(timezone.utc).isoformat(),
             })
     await get_settings()  # crea le impostazioni di default se mancano
+    import messaging, short_links, whatsapp_queue   # noqa: E401
+    try:
+        await messaging.ensure_indexes()
+        await short_links.ensure_indexes()
+        await whatsapp_queue.ensure_indexes()
+        await messaging.seed()      # crea i modelli dei messaggi mancanti, non tocca quelli modificati
+    except Exception:
+        logger.exception('Preparazione dei messaggi non riuscita')
     asyncio.create_task(_ical_scheduler_loop())
     asyncio.create_task(_cleanup_scheduler_loop())
 
@@ -129,14 +142,14 @@ async def _ical_scheduler_loop():
 
 
 async def _cleanup_scheduler_loop():
-    """Ogni 5 minuti: checkout abbandonati, richieste scadute, notifiche programmate, backup automatico."""
+    """Ogni 5 minuti: checkout abbandonati, richieste scadute, notifiche programmate, backup, invii all'ospite.
+    Ogni attività è indipendente: se una dà errore, le altre girano comunque."""
     await asyncio.sleep(60)  # attesa iniziale
+    jobs = (cleanup_expired_bookings, expire_requests, run_scheduled, run_scheduled_backup, guest_reminders.run)
     while True:
-        try:
-            await cleanup_expired_bookings()
-            await expire_requests()
-            await run_scheduled()
-            await run_scheduled_backup()
-        except Exception as e:
-            logging.exception(f'Cleanup scheduler failed: {e}')
+        for job in jobs:
+            try:
+                await job()
+            except Exception:
+                logging.exception(f'Attività automatica {job.__name__} non riuscita')
         await asyncio.sleep(5 * 60)  # ogni 5 minuti

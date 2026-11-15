@@ -201,6 +201,8 @@ async def update_admin_settings(
         raise HTTPException(400, 'No fields to update')
 
     current = await get_settings()
+    if 'reminders' in patch:   # si aggiornano solo i promemoria inviati, gli altri restano come sono
+        patch['reminders'] = {**(current.get('reminders') or {}), **patch['reminders']}
     changed = [src for src in ('airbnb', 'booking')
                if f'ical_{src}_url' in patch and patch[f'ical_{src}_url'] != current.get(f'ical_{src}_url')]
     if changed:

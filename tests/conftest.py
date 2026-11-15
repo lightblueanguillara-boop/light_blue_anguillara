@@ -12,6 +12,7 @@ os.environ.setdefault('DB_NAME', 'light_blue_test')
 os.environ['JWT_SECRET'] = 'test-secret-' + 'x' * 40
 os.environ['STRIPE_WEBHOOK_SECRET'] = 'whsec_test'
 os.environ['STRIPE_API_KEY'] = 'sk_test_fake'
+os.environ['RESEND_API_KEY'] = 're_test_fake'   # le email "partono" verso il finto Resend dei test
 os.environ['ADMIN_SEED_EMAIL'] = 'admin@example.com'
 os.environ['ADMIN_SEED_PASSWORD'] = 'password-di-test-123'
 os.environ['ADMIN_NOTIFY_EMAIL'] = 'notify@example.com'
@@ -113,8 +114,11 @@ def client(app_client, mongo, fake_stripe, sent_emails):
     ratelimit.reset_all()
     for col in ('bookings', 'payment_transactions', 'contact_messages', 'subscribers',
                 'unsubscribed', 'marketing_logs', 'gallery', 'price_overrides',
-                'push_subscriptions', 'push_outbox'):
+                'push_subscriptions', 'push_outbox', 'email_outbox', 'whatsapp_queue', 'short_links'):
         mongo[col].delete_many({})
+    # testi dei messaggi di nuovo quelli originali e tutti attivi
+    mongo.message_templates.update_many({}, [{'$set': {'body': '$original_body', 'subject': '$original_subject',
+                                                       'active': True}}])
     mongo.settings.delete_many({})
     mongo.brand_assets.delete_many({})
     mongo.admins.update_many({}, {'$set': {'token_version': 0}, '$unset': {'known_devices': ''}})

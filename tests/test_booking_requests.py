@@ -49,8 +49,10 @@ def test_request_created_blocks_dates_and_notifies(client, mongo, sent_emails, f
     assert client.post('/api/bookings/request', json=request_payload(41, 44)).status_code == 409
     assert wait_for(lambda: len(sent_emails) == 2)
     subjects = {m['to'][0]: m['subject'] for m in sent_emails}
-    assert 'Richiesta ricevuta' in subjects['mario@example.com']
-    assert 'Nuova richiesta' in subjects['notify@example.com']
+    assert 'ricevuto la tua richiesta' in subjects['mario@example.com']
+    assert 'Nuova richiesta da Mario Rossi' == subjects['notify@example.com']
+    owner = next(m for m in sent_emails if m['to'] == ['notify@example.com'])
+    assert owner['reply_to'] == 'mario@example.com'             # rispondendo si scrive all'ospite
 
 
 def test_hold_hours_from_settings(client, auth, mongo):
@@ -72,10 +74,14 @@ def test_approve_sends_payment_link_then_payment_confirms(client, auth, mongo, f
     kw = fake_stripe.sessions[sid]['kw']
     assert kw['line_items'][0]['price_data']['unit_amount'] == 34200
     assert kw['success_url'].startswith('https://www.example-site.test/payment/success')
-    assert b['payment_url'] in j['whatsapp_text'] and 'accettata' in j['whatsapp_text']
+    # WhatsApp in coda (l'ospite ha accettato di essere contattato) con il link corto al pagamento
+    assert j['email_sent'] is True and j['whatsapp_id']
+    wa = mongo.whatsapp_queue.find_one({'id': j['whatsapp_id']})
+    assert wa['key'] == 'richiesta_accettata' and wa['phone'] == '393331234567' and 'accettato' in wa['text']
+    assert b['payment_url'] in _expand(client, wa['text'])     # (link finto corto: resta com'è)
     assert wait_for(lambda: any('accettata' in m['subject'] for m in sent_emails))
     approved_mail = next(m for m in sent_emails if 'accettata' in m['subject'])
-    assert b['payment_url'] in approved_mail['html']
+    assert 'Paga e conferma' in approved_mail['html'] and b['payment_url'] in _expand(client, approved_mail['html'])
     # già decisa: non si può approvare due volte
     assert client.post(f'/api/admin/bookings/{bid}/approve', headers=auth).status_code == 409
     # l'ospite paga dal link
@@ -83,6 +89,14 @@ def test_approve_sends_payment_link_then_payment_confirms(client, auth, mongo, f
     client.get(f'/api/payments/status/{sid}')
     b = mongo.bookings.find_one({'id': bid})
     assert b['status'] == 'confirmed' and b['payment_status'] == 'fully_paid'
+    # pagato: il WhatsApp "paga qui" non serve più e arriva la conferma
+    assert mongo.whatsapp_queue.find_one({'id': j['whatsapp_id']})['status'] == 'annullato'
+    assert wait_for(lambda: mongo.whatsapp_queue.find_one({'booking_id': bid, 'key': 'prenotazione_confermata'}))
+
+
+def _expand(client, text):
+    import short_links
+    return client.portal.call(short_links.expand, text)
 
 
 def test_approve_fails_cleanly_if_stripe_down(client, auth, mongo, fake_stripe):
@@ -97,7 +111,8 @@ def test_reject_frees_dates_and_notifies(client, auth, mongo, sent_emails):
     bid = client.post('/api/bookings/request', json=request_payload()).json()['booking_id']
     r = client.post(f'/api/admin/bookings/{bid}/reject', headers=auth, json={'reason': 'Casa non disponibile per lavori'})
     assert r.status_code == 200
-    assert 'lavori' in r.json()['whatsapp_text']
+    wa = mongo.whatsapp_queue.find_one({'id': r.json()['whatsapp_id']})
+    assert wa['key'] == 'richiesta_rifiutata' and 'lavori' in wa['text']
     assert mongo.bookings.find_one({'id': bid})['status'] == 'rejected'
     blocked = client.get('/api/availability', params={'start': d(40), 'end': d(43)}).json()['blocked_dates']
     assert blocked == []
@@ -127,7 +142,7 @@ def test_unanswered_request_expires(client, mongo, sent_emails):
     _run(client, expire_requests)
     assert mongo.bookings.find_one({'id': bid})['status'] == 'expired'
     assert client.get('/api/availability', params={'start': d(40), 'end': d(43)}).json()['blocked_dates'] == []
-    assert wait_for(lambda: any('scaduta' in m['subject'] for m in sent_emails))
+    assert wait_for(lambda: any('chiusa automaticamente' in m['html'] for m in sent_emails))
 
 
 def test_unpaid_approved_request_expires(client, auth, mongo, fake_stripe):
@@ -152,10 +167,10 @@ def test_late_payment_wins_over_expiry(client, auth, mongo, fake_stripe):
     assert mongo.bookings.find_one({'id': bid})['status'] == 'confirmed'
 
 
-def test_whatsapp_text_endpoint(client, auth):
+def test_whatsapp_link_endpoint(client, auth):
     bid = client.post('/api/bookings/request', json=request_payload()).json()['booking_id']
-    r = client.get(f'/api/admin/bookings/{bid}/whatsapp', headers=auth).json()
-    assert r['phone'] == '333 1234567' and 'Mario' in r['text']
+    r = client.post('/api/admin/whatsapp/link', headers=auth, json={'booking_id': bid}).json()
+    assert r['phone'] == '393331234567' and 'Mario' in r['text'] and r['link'].startswith('https://api.whatsapp.com/send')
 
 
 def test_analytics_counts_requests(client, auth):

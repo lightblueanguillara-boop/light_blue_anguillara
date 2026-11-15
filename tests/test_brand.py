@@ -49,9 +49,8 @@ def test_upload_logo_changes_everything(client, auth, mongo):
     assert 'immutable' in after.headers['cache-control']        # con versione: cache lunga
     assert Image.open(io.BytesIO(after.content)).getpixel((96, 96))[:3] == (30, 120, 200)
     # le email usano la nuova versione
-    from email_helpers import email_booking_confirmation_html
-    html = email_booking_confirmation_html({'guest_name': 'X', 'check_in': '2030-01-01', 'check_out': '2030-01-02'},
-                                           client.get('/api/admin/settings', headers=auth).json())
+    from messaging import compose_email
+    html, _ = compose_email(client.get('/api/admin/settings', headers=auth).json(), 'Prova', 'Ciao X')
     assert f'/api/brand/logo-256.png?v={v}' in html
     # ripristino del logo predefinito
     assert client.delete('/api/admin/brand/logo', headers=auth).status_code == 200

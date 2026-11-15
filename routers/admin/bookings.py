@@ -10,15 +10,9 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from auth import get_current_admin
 from db import db, get_settings, STRIPE_API_KEY
-from email_helpers import (
-    send_email_async, 
-    email_balance_reminder_html, 
-    email_booking_confirmation_html, 
-    email_cancellation_html,
-    email_modification_confirmation_html,
-    is_placeholder_email,
-    _it_date
-)
+from email_helpers import is_placeholder_email, _it_date
+import messaging
+import whatsapp_queue
 from models import BookingUpdate, RefundRequest, _validate_iso_date
 from pricing import BLOCKING_STATUSES, compute_refund_amount
 
@@ -102,21 +96,13 @@ async def create_manual_booking(payload: dict, admin=Depends(get_current_admin))
         if "_id" in booking_data:
             del booking_data["_id"]
 
-        if not placeholder_email:
-            asyncio.create_task(send_email_async(
-                guest_email,
-                f"Prenotazione confermata — {settings.get('villa_name', 'Light Blue')}",
-                email_booking_confirmation_html(booking_data, settings),
-            ))
-            logging.info(f"Email di conferma inviata per prenotazione manuale {booking_data['id']} a {guest_email}")
-        else:
-            logging.info(f"Prenotazione manuale {booking_data['id']} creata con email placeholder — nessuna conferma inviata.")
-
+        sent = await messaging.invia('prenotazione_confermata', booking_data, settings=settings)
         return {
             "ok": True,
             "message": "Prenotazione creata con successo",
             "booking": booking_data,
-            "email_sent": not placeholder_email,
+            "email_sent": bool(sent['email']),
+            "whatsapp_id": sent['whatsapp_id'],
         }
 
     except HTTPException:
@@ -155,6 +141,7 @@ async def update_booking(booking_id: str, updates: BookingUpdate, admin=Depends(
                     f"Le date modificate si sovrappongono con la prenotazione di {existing_overlap.get('guest_name')} ({_it_date(existing_overlap.get('check_in'))} → {_it_date(existing_overlap.get('check_out'))})"
                 )
 
+    patch['updated_at'] = datetime.now(timezone.utc).isoformat()
     result = await db.bookings.update_one({'id': decoded_id}, {'$set': patch})
     if result.matched_count == 0 and decoded_id != booking_id:
         await db.bookings.update_one({'id': booking_id}, {'$set': patch})
@@ -163,18 +150,18 @@ async def update_booking(booking_id: str, updates: BookingUpdate, admin=Depends(
     if not updated_booking and decoded_id != booking_id:
         updated_booking = await db.bookings.find_one({'id': booking_id}, {'_id': 0})
 
-    # L'email all'ospite parte solo se cambiano dati che lo riguardano (non per stato/pagamento)
-    guest_relevant = {'check_in', 'check_out', 'guest_name', 'guest_email', 'is_refundable'}
+    if current_b and updated_booking and (patch.get('check_in', current_b.get('check_in')) != current_b.get('check_in')
+                                          or patch.get('check_out', current_b.get('check_out')) != current_b.get('check_out')):
+        # date spostate: promemoria da rifare per le date nuove, evento del calendario aggiornato
+        await messaging.booking_dates_changed(updated_booking['id'])
+        updated_booking = await db.bookings.find_one({'id': updated_booking['id']}, {'_id': 0})
+
+    # Il messaggio all'ospite parte solo se cambiano dati che lo riguardano (non per stato/pagamento)
+    guest_relevant = {'check_in', 'check_out', 'guest_name', 'guest_email', 'is_refundable', 'adults', 'children',
+                      'total_price'}
     changed = current_b and any(k in patch and patch[k] != current_b.get(k) for k in guest_relevant)
-    if updated_booking and changed and updated_booking.get('status') != 'cancelled':
-        guest_email = updated_booking.get('guest_email', '').strip()
-        if not is_placeholder_email(guest_email):
-            settings = await get_settings()
-            asyncio.create_task(send_email_async(
-                guest_email,
-                f"Modifica prenotazione — {settings.get('villa_name', 'Light Blue')}",
-                email_modification_confirmation_html(updated_booking, settings),
-            ))
+    if updated_booking and changed and updated_booking.get('status') == 'confirmed':
+        await messaging.invia('prenotazione_modificata', updated_booking)
 
     return updated_booking
 
@@ -208,16 +195,14 @@ async def delete_booking(booking_id: str, admin=Depends(get_current_admin)):
         }},
     )
 
-    # email di cortesia solo per prenotazioni confermate con un indirizzo vero
-    send = b.get('status') == 'confirmed' and not is_placeholder_email(b.get('guest_email'))
-    if send:
-        asyncio.create_task(send_email_async(
-            b['guest_email'].strip(),
-            f"Prenotazione cancellata — {settings.get('villa_name', 'Light Blue')}",
-            email_cancellation_html(b, settings),
-        ))
-    logging.info(f"Prenotazione {decoded_id} archiviata (email inviata: {send})")
-    return {'ok': True, 'archived': True, 'email_sent': send}
+    # i messaggi ancora in coda per questa prenotazione non hanno più senso
+    await whatsapp_queue.cancel_for_booking(decoded_id)
+    # messaggio di cortesia solo per prenotazioni confermate (niente frase sul rimborso: non ne parte nessuno)
+    sent = {'email': None, 'whatsapp_id': None}
+    if b.get('status') == 'confirmed':
+        sent = await messaging.invia('prenotazione_cancellata', b, {'nota_rimborso': ''}, settings=settings)
+    logging.info(f"Prenotazione {decoded_id} archiviata (email inviata: {bool(sent['email'])})")
+    return {'ok': True, 'archived': True, 'email_sent': bool(sent['email']), 'whatsapp_id': sent['whatsapp_id']}
 
 
 PAID_STATES = ('deposit_paid', 'fully_paid')
@@ -307,16 +292,11 @@ async def cancel_and_refund(booking_id: str, payload: RefundRequest, admin=Depen
         }},
     )
 
-    email_sent = not is_placeholder_email(b.get('guest_email'))
-    if email_sent:
-        settings = await get_settings()
-        asyncio.create_task(send_email_async(
-            b['guest_email'].strip(),
-            f"Prenotazione cancellata — {settings.get('villa_name', 'Light Blue')}",
-            email_cancellation_html(b, settings, refund_amount=refund_amount if paid > 0 else None),
-            ref_url=f"/admin/bookings?open={decoded_id}",
-        ))
-    return {'ok': True, 'refund_amount': refund_amount, 'email_sent': email_sent}
+    await whatsapp_queue.cancel_for_booking(decoded_id)
+    note = messaging.refund_note(paid, refund_amount if paid > 0 else None)
+    sent = await messaging.invia('prenotazione_cancellata', b, {'nota_rimborso': note})
+    return {'ok': True, 'refund_amount': refund_amount, 'email_sent': bool(sent['email']),
+            'whatsapp_id': sent['whatsapp_id']}
 
 @router.post("/admin/bookings/{booking_id}/balance-reminder")
 async def balance_reminder(booking_id: str, admin=Depends(get_current_admin)):
@@ -326,17 +306,8 @@ async def balance_reminder(booking_id: str, admin=Depends(get_current_admin)):
     if not b:
         raise HTTPException(404, 'Booking not found')
 
-    settings = await get_settings()
-
-    ok = await send_email_async(
-        b['guest_email'],
-        f"Promemoria saldo — {settings.get('villa_name','Light Blue')}",
-        email_balance_reminder_html(b, settings),
-    )
-
-    await db.bookings.update_one(
-        {'id': decoded_id},
-        {'$set': {'last_reminder_at': datetime.now(timezone.utc).isoformat()}},
-    )
-
-    return {'ok': ok}
+    sent = await messaging.invia('promemoria_saldo', b)
+    now = datetime.now(timezone.utc).isoformat()
+    await db.bookings.update_one({'id': decoded_id},
+                                 {'$set': {'last_reminder_at': now, 'reminders.promemoria_saldo': now}})
+    return {'ok': bool(sent['email']), 'email_sent': bool(sent['email']), 'whatsapp_id': sent['whatsapp_id']}

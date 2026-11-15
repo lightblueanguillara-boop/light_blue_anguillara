@@ -14,16 +14,9 @@ from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from auth import get_current_admin
-from db import db, get_settings, ADMIN_NOTIFY_EMAIL, FRONTEND_URL
-from email_helpers import (
-    send_email_async,
-    email_request_received_html,
-    email_request_admin_html,
-    email_request_approved_html,
-    email_request_rejected_html,
-    email_request_expired_html,
-    whatsapp_text,
-)
+from db import db, get_settings, FRONTEND_URL
+import messaging
+import whatsapp_queue
 from models import Booking, BookingRequestCreate, RejectRequest, Subscriber
 from pricing import BLOCKING_STATUSES, compute_dual_pricing, dates_available
 from notifications import notify
@@ -36,9 +29,9 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-async def _notify_guest(booking: dict, subject: str, html_body: str):
-    asyncio.create_task(send_email_async(booking['guest_email'], subject, html_body,
-                                         ref_url=f"/admin/bookings?open={booking['id']}"))
+def _in_background(coro):
+    """Email e WhatsApp in sottofondo: la risposta all'ospite non aspetta il servizio email."""
+    asyncio.create_task(coro)
 
 
 # --- PUBBLICO -----------------------------------------------------------------
@@ -97,14 +90,9 @@ async def create_booking_request(payload: BookingRequestCreate, request: Request
         await db.unsubscribed.delete_one({'email': payload.guest_email.lower()})
 
     b = booking.model_dump()
-    villa = settings.get('villa_name', 'Light Blue')
-    await _notify_guest(b, f"Richiesta ricevuta — {villa}", email_request_received_html(b, settings))
-    if ADMIN_NOTIFY_EMAIL:
-        asyncio.create_task(send_email_async(
-            ADMIN_NOTIFY_EMAIL,
-            f"[Light Blue] Nuova richiesta di prenotazione da {booking.guest_name[:60]}",
-            email_request_admin_html(b, settings, f"{FRONTEND_URL}/admin/bookings"),
-        ))
+    _in_background(messaging.invia('richiesta_ricevuta', b, settings=settings, whatsapp=False))
+    _in_background(messaging.notify_owner('gestore_nuova_richiesta', messaging.booking_vars(b, settings),
+                                          booking=b, settings=settings, reply_to=b['guest_email']))
     asyncio.create_task(notify('new_request', booking=b))
     return {'ok': True, 'booking_id': booking.id, 'request_expires_at': booking.request_expires_at,
             'total_price': total, 'hold_hours': hold_hours}
@@ -147,9 +135,8 @@ async def approve_request(booking_id: str, admin=Depends(get_current_admin)):
     }
     await db.bookings.update_one({'id': b['id'], 'status': 'request'}, {'$set': update})
     b.update(update)
-    await _notify_guest(b, f"Richiesta accettata — completa il pagamento — {settings.get('villa_name', 'Light Blue')}",
-                        email_request_approved_html(b, settings))
-    return {'ok': True, 'booking': b, 'whatsapp_text': whatsapp_text('approved', b, settings)}
+    sent = await messaging.invia('richiesta_accettata', b, settings=settings)
+    return {'ok': True, 'booking': b, 'email_sent': sent['email'], 'whatsapp_id': sent['whatsapp_id']}
 
 
 @router.post("/admin/bookings/{booking_id}/reject")
@@ -172,18 +159,10 @@ async def reject_request(booking_id: str, payload: RejectRequest, admin=Depends(
     }
     await db.bookings.update_one({'id': b['id']}, {'$set': update})
     b.update(update)
-    await _notify_guest(b, f"Richiesta di prenotazione — {settings.get('villa_name', 'Light Blue')}",
-                        email_request_rejected_html(b, settings))
-    return {'ok': True, 'booking': b, 'whatsapp_text': whatsapp_text('rejected', b, settings)}
-
-
-@router.get("/admin/bookings/{booking_id}/whatsapp")
-async def whatsapp_message(booking_id: str, admin=Depends(get_current_admin)):
-    """Testo WhatsApp suggerito in base allo stato della prenotazione."""
-    b = await _get_booking(booking_id)
-    settings = await get_settings()
-    kind = {'awaiting_payment': 'approved', 'rejected': 'rejected'}.get(b.get('status'), 'generic')
-    return {'text': whatsapp_text(kind, b, settings), 'phone': b.get('guest_phone') or ''}
+    # il messaggio "richiesta accettata" ancora in coda non ha più senso
+    await whatsapp_queue.cancel_for_booking(b['id'], keys=['richiesta_accettata'])
+    sent = await messaging.invia('richiesta_rifiutata', b, settings=settings)
+    return {'ok': True, 'booking': b, 'email_sent': sent['email'], 'whatsapp_id': sent['whatsapp_id']}
 
 
 # --- SCADENZE -----------------------------------------------------------------
@@ -198,9 +177,8 @@ async def expire_awaiting_payment(booking_id: str):
         {'$set': {'status': 'expired', 'decided_at': _now().isoformat()}},
     )
     if res.modified_count:
-        settings = await get_settings()
-        await _notify_guest(b, f"Richiesta scaduta — {settings.get('villa_name', 'Light Blue')}",
-                            email_request_expired_html(b, settings, unpaid=True))
+        await whatsapp_queue.cancel_for_booking(booking_id, keys=['richiesta_accettata'])
+        _in_background(messaging.invia('pagamento_scaduto', b, whatsapp=False))
         await notify('payment_expired', booking=b)
 
 
@@ -220,8 +198,7 @@ async def expire_requests():
         )
         if res.modified_count:
             settings = settings or await get_settings()
-            await _notify_guest(b, f"Richiesta scaduta — {settings.get('villa_name', 'Light Blue')}",
-                                email_request_expired_html(b, settings, unpaid=False))
+            _in_background(messaging.invia('richiesta_scaduta', b, settings=settings, whatsapp=False))
             logging.info(f"Richiesta {b['id']} scaduta senza risposta")
             await notify('request_expired', booking=b)
 

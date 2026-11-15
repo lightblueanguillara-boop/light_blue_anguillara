@@ -263,6 +263,28 @@ class VillaSettings(BaseModel):
     legal_owner_address: str = ''
     tourist_tax_note: str = ''
     backup_email_frequency: str = 'weekly'   # backup automatico per email: daily | weekly | off
+    # --- Informazioni per gli ospiti (usate nei messaggi; righe vuote = non compaiono) ---
+    checkin_time: str = ''
+    checkout_time: str = ''
+    arrival_directions: str = ''
+    entry_instructions: str = ''
+    parking_info: str = ''
+    wifi_info: str = ''
+    checkout_instructions: str = ''
+    balance_payment_method: str = ''
+    review_url: str = ''
+    # --- Messaggi ---
+    message_signature: str = 'Light Blue Anguillara'
+    email_reply_to: str = ''
+    whatsapp_open_with: Literal['auto', 'app', 'web'] = 'auto'
+    owner_whatsapp: str = ''
+    reminders: dict = Field(default_factory=lambda: {
+        'promemoria_saldo': {'enabled': True, 'days': 7, 'time': '10:00'},
+        'istruzioni_arrivo': {'enabled': True, 'days': 2, 'time': '10:00'},
+        'promemoria_checkout': {'enabled': True, 'time': '18:00'},
+        'grazie_recensione': {'enabled': True, 'time': '11:00'},
+        'whatsapp_da_inviare': {'enabled': True, 'time': '19:00'},
+    })
 
 # Usato da operations.py per aggiornare le impostazioni globali della villa
 class SettingsUpdate(BaseModel):
@@ -297,6 +319,60 @@ class SettingsUpdate(BaseModel):
     legal_owner_address: Optional[str] = Field(default=None, max_length=300)
     tourist_tax_note: Optional[str] = Field(default=None, max_length=1000)
     backup_email_frequency: Optional[str] = Field(default=None, pattern=r'^(daily|weekly|off)$')
+    checkin_time: Optional[str] = Field(default=None, pattern=r'^(([01]\d|2[0-3]):[0-5]\d)?$')
+    checkout_time: Optional[str] = Field(default=None, pattern=r'^(([01]\d|2[0-3]):[0-5]\d)?$')
+    arrival_directions: Optional[str] = Field(default=None, max_length=1500)
+    entry_instructions: Optional[str] = Field(default=None, max_length=1500)
+    parking_info: Optional[str] = Field(default=None, max_length=800)
+    wifi_info: Optional[str] = Field(default=None, max_length=300)
+    checkout_instructions: Optional[str] = Field(default=None, max_length=1500)
+    balance_payment_method: Optional[str] = Field(default=None, max_length=300)
+    review_url: Optional[str] = Field(default=None, max_length=500, pattern=r'^(https://\S+)?$')
+    message_signature: Optional[str] = Field(default=None, min_length=2, max_length=80)
+    email_reply_to: Optional[str] = Field(default=None, max_length=200)
+    whatsapp_open_with: Optional[Literal['auto', 'app', 'web']] = None
+    owner_whatsapp: Optional[str] = Field(default=None, max_length=40)
+    reminders: Optional[dict] = None
+
+    @field_validator('email_reply_to')
+    @classmethod
+    def _reply_to(cls, v):
+        if v:
+            from email_validator import validate_email, EmailNotValidError
+            try:
+                validate_email(v, check_deliverability=False)
+            except EmailNotValidError:
+                raise ValueError("Indirizzo per le risposte non valido")
+        return v
+
+    @field_validator('reminders')
+    @classmethod
+    def _reminders(cls, v):
+        if v is None:
+            return v
+        import re as _re
+        allowed = {'promemoria_saldo': (1, 30), 'istruzioni_arrivo': (0, 14), 'promemoria_checkout': None,
+                   'grazie_recensione': None, 'whatsapp_da_inviare': None}
+        clean = {}
+        for key, conf in v.items():
+            if key not in allowed or not isinstance(conf, dict):
+                raise ValueError(f'Promemoria sconosciuto: {key}')
+            item = {'enabled': bool(conf.get('enabled', True))}
+            t = str(conf.get('time', ''))
+            if not _re.fullmatch(r'([01]\d|2[0-3]):[0-5]\d', t):
+                raise ValueError('Orario del promemoria non valido (formato HH:MM)')
+            item['time'] = t
+            if allowed[key]:
+                lo, hi = allowed[key]
+                try:
+                    days = int(conf.get('days'))
+                except (TypeError, ValueError):
+                    raise ValueError('Giorni del promemoria non validi')
+                if not lo <= days <= hi:
+                    raise ValueError(f'Giorni del promemoria fuori intervallo ({lo}-{hi})')
+                item['days'] = days
+            clean[key] = item
+        return clean
 
 class GalleryImage(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))

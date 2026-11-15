@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo.errors import DuplicateKeyError
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -49,6 +50,17 @@ settings_collection = db.settings
 bookings_collection = db.bookings
 
 
+async def ensure_settings_unique() -> None:
+    """Un solo documento di impostazioni: indice unico su `id`.
+
+    Se per una vecchia condizione di gara esistessero già copie doppie, si tiene quella che il sito
+    sta già usando (la prima in ordine di inserimento, la stessa che restituisce find_one) e si tolgono le altre."""
+    docs = await settings_collection.find({'id': 'global'}, {'_id': 1}).sort('$natural', 1).to_list(100)
+    if len(docs) > 1:
+        await settings_collection.delete_many({'_id': {'$in': [d['_id'] for d in docs[1:]]}})
+    await settings_collection.create_index('id', unique=True)
+
+
 async def get_settings() -> dict:
     """Fetch global VillaSettings, seeding defaults if missing.
     Also fills any missing default fields from the model into the persisted doc
@@ -57,8 +69,11 @@ async def get_settings() -> dict:
     s = await settings_collection.find_one({'id': 'global'}, {'_id': 0})
     if not s:
         # upsert atomico: due richieste contemporanee non possono creare due documenti
-        await settings_collection.update_one(
-            {'id': 'global'}, {'$setOnInsert': VillaSettings().model_dump()}, upsert=True)
+        try:
+            await settings_collection.update_one(
+                {'id': 'global'}, {'$setOnInsert': VillaSettings().model_dump()}, upsert=True)
+        except DuplicateKeyError:
+            pass   # creato nello stesso istante da un'altra richiesta: va bene così
         s = await settings_collection.find_one({'id': 'global'}, {'_id': 0})
     defaults = VillaSettings().model_dump()
     missing = {k: v for k, v in defaults.items() if k not in s}

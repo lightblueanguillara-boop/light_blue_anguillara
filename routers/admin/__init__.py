@@ -7,6 +7,7 @@ from fastapi import APIRouter
 
 from .auth import router as auth_router
 from .backup import router as backup_router
+from .messages import router as messages_router
 from .bookings import router as bookings_router
 from .calendar import router as calendar_router
 from .push import router as push_router
@@ -17,6 +18,7 @@ from .operations import router as operations_router
 router = APIRouter()
 router.include_router(auth_router)
 router.include_router(backup_router)
+router.include_router(messages_router)
 router.include_router(bookings_router)
 router.include_router(calendar_router)
 router.include_router(push_router)

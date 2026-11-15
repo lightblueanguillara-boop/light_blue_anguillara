@@ -9,8 +9,10 @@ from icalendar import Calendar, Event
 from pydantic import BaseModel
 
 from auth import email_from_newsletter_token
-from db import db, get_settings, ADMIN_NOTIFY_EMAIL
-from email_helpers import send_email_async, email_admin_contact_notification_html, email_guest_contact_confirmation_html
+from db import db, get_settings
+import logging
+import messaging
+import short_links
 from models import ContactMessage, ContactCreate, Subscriber, GalleryImage, _validate_iso_date, validate_stay
 from pricing import BLOCKING_STATUSES, compute_dual_pricing, dates_available, daterange
 from notifications import notify
@@ -116,20 +118,21 @@ async def contact(payload: ContactCreate, request: Request):
             await db.subscribers.insert_one(sub.model_dump())
         # nuovo consenso esplicito: annulla un'eventuale disiscrizione precedente
         await db.unsubscribed.delete_one({'email': payload.email.lower()})
-    if ADMIN_NOTIFY_EMAIL:
-        asyncio.create_task(send_email_async(
-            ADMIN_NOTIFY_EMAIL,
-            f"[Light Blue] Nuova richiesta da {payload.name[:60]}",
-            email_admin_contact_notification_html(msg.model_dump()),
-        ))
     asyncio.create_task(notify('new_message', message=msg.model_dump()))
-    # Conferma automatica all'ospite
-    asyncio.create_task(send_email_async(
-        payload.email,
-        "Abbiamo ricevuto la tua richiesta — Light Blue Anguillara",
-        email_guest_contact_confirmation_html(msg.model_dump()),
-    ))
+    asyncio.create_task(_contact_emails(msg.model_dump()))
     return {'ok': True, 'id': msg.id}
+
+
+async def _contact_emails(msg: dict):
+    """Conferma all'ospite + avviso al proprietario (con «rispondi a» = l'ospite). Mai bloccante."""
+    settings = await get_settings()
+    variables = messaging.contact_vars(msg, settings)
+    try:
+        await messaging.send_template_email('contatto_ricevuto', msg['email'], variables, settings=settings,
+                                            message_id=msg['id'])
+    except Exception:
+        logging.exception('Email contatto_ricevuto non registrata')
+    await messaging.notify_owner('gestore_nuovo_messaggio', variables, settings=settings, reply_to=msg['email'])
 
 
 class UnsubscribeRequest(BaseModel):
@@ -220,3 +223,14 @@ async def export_ical():
         ev.add('dtstamp', datetime.now(timezone.utc))
         cal.add_component(ev)
     return Response(content=cal.to_ical(), media_type='text/calendar')
+
+
+@router.get("/l/{code}")
+async def resolve_short_link(code: str, response: Response):
+    """Link corto → destinazione (la pagina /l/<codice> del sito poi ci porta l'utente)."""
+    response.headers['Cache-Control'] = 'no-store'
+    response.headers['Referrer-Policy'] = 'no-referrer'
+    destination = await short_links.resolve(code)
+    if not destination:
+        raise HTTPException(404, 'Link non valido o scaduto')
+    return {'destination': destination}

@@ -10,7 +10,9 @@ import stripe
 from fastapi import APIRouter, HTTPException, Request, BackgroundTasks
 
 from db import db, get_settings, STRIPE_API_KEY, STRIPE_WEBHOOK_SECRET, ADMIN_NOTIFY_EMAIL, FRONTEND_URL
-from email_helpers import send_email_async, email_booking_confirmation_html
+from email_helpers import send_email_async
+import messaging
+import whatsapp_queue
 from models import Booking, BookingCreate, PaymentTransaction, Subscriber
 from pricing import BLOCKING_STATUSES, compute_dual_pricing, dates_available
 from notifications import notify
@@ -106,12 +108,12 @@ async def _mark_paid(session_id: str, payment_intent: Optional[str]):
     booking = await db.bookings.find_one({'id': tx['booking_id']}, {'_id': 0})
     if booking:
         asyncio.create_task(notify('booking_confirmed', booking=booking))
-        asyncio.create_task(send_email_async(
-            booking['guest_email'],
-            f"Prenotazione confermata — {settings.get('villa_name', 'Light Blue')}",
-            email_booking_confirmation_html(booking, settings),
-            ref_url=f"/admin/bookings?open={booking['id']}",
-        ))
+        # il WhatsApp "richiesta accettata, paga qui" non serve più: ha pagato
+        await whatsapp_queue.cancel_for_booking(booking['id'], keys=['richiesta_accettata'])
+        asyncio.create_task(messaging.invia('prenotazione_confermata', booking, settings=settings))
+        asyncio.create_task(messaging.notify_owner('gestore_pagamento_ricevuto',
+                                                   messaging.booking_vars(booking, settings),
+                                                   booking=booking, settings=settings))
 
 
 async def _can_confirm(booking: dict) -> bool:
