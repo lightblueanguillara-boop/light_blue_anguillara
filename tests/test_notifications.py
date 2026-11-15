@@ -54,7 +54,7 @@ def test_subscribe_rejects_unknown_push_services(client, auth, endpoint):
 def test_test_notification(client, auth, pushes, mongo):
     r = client.post('/api/admin/push/test', headers=auth, json={})
     assert r.status_code == 200 and r.json()['sent'] == 1
-    p = pushes[-1]
+    p = last(pushes, 'test')   # non pushes[-1]: l'avviso "nuovo accesso" del login può arrivare dopo
     assert p['title'] == 'Notifiche attive' and p['url'] == '/admin/settings#notifiche' and plain(p['body'])
     mongo.push_subscriptions.delete_many({})
     assert client.post('/api/admin/push/test', headers=auth, json={}).status_code == 400
