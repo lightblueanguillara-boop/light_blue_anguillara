@@ -56,9 +56,10 @@ async def get_settings() -> dict:
     from models import VillaSettings  # local import avoids cycle
     s = await settings_collection.find_one({'id': 'global'}, {'_id': 0})
     if not s:
-        default = VillaSettings().model_dump()
-        await settings_collection.insert_one(default.copy())
-        return default
+        # upsert atomico: due richieste contemporanee non possono creare due documenti
+        await settings_collection.update_one(
+            {'id': 'global'}, {'$setOnInsert': VillaSettings().model_dump()}, upsert=True)
+        s = await settings_collection.find_one({'id': 'global'}, {'_id': 0})
     defaults = VillaSettings().model_dump()
     missing = {k: v for k, v in defaults.items() if k not in s}
     if missing:

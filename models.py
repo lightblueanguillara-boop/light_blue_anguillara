@@ -317,8 +317,8 @@ class MarketingEmail(BaseModel):
     recipients: List[EmailStr]  # coincide con selectedEmails inviato dal JSX
 
 class RefundRequest(BaseModel):
-    amount: Optional[float] = None
-    reason: Optional[str] = None
+    amount: Optional[float] = Field(default=None, ge=0, le=100000)
+    reason: Optional[str] = Field(default=None, max_length=500)
 
 class PaymentTransaction(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))

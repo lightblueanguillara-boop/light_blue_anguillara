@@ -97,6 +97,12 @@ def _cancellation_policy_info(booking: dict, settings: dict) -> dict:
     }
 
 
+def is_placeholder_email(email: Optional[str]) -> bool:
+    """Indirizzi segnaposto (prenotazioni manuali senza email, ospiti Airbnb/Booking): mai scrivere lì."""
+    e = (email or '').strip().lower()
+    return not e or e == 'manual@booking.com' or e.endswith('@lightblue-anguillara.it')
+
+
 async def send_email_async(to_email: str, subject: str, html_body: str, headers: Optional[dict] = None,
                            ref_url: Optional[str] = None) -> bool:
     try:
@@ -202,25 +208,34 @@ def email_balance_reminder_html(booking: dict, settings: dict) -> str:
     """
 
 
-def email_cancellation_html(booking: dict, settings: dict) -> str:
-    """Email di cancellazione prenotazione — stessa grafica della conferma."""
+def email_cancellation_html(booking: dict, settings: dict, refund_amount: Optional[float] = None) -> str:
+    """Email di cancellazione prenotazione — stessa grafica della conferma.
+
+    refund_amount: importo effettivamente rimborsato con Stripe (None = cancellazione senza
+    rimborso online, es. prenotazione manuale: nessuna frase sul rimborso, per non promettere nulla).
+    """
     booking, settings = _esc(booking), _esc(settings)
     villa = settings.get('villa_name', 'Light Blue')
-    total_paid = 0.0
-    if booking.get('payment_status') == 'deposit_paid':
-        total_paid = booking.get('deposit_amount', 0)
-    elif booking.get('payment_status') == 'fully_paid':
-        total_paid = booking.get('total_price', 0)
 
     refund_row = ''
-    if total_paid and total_paid > 0:
+    if refund_amount is not None and refund_amount > 0:
+        refund_row = f"""
+        <tr style="border-top:1px solid #E5E0D8">
+          <td colspan="2" style="padding:16px 0 4px 0">
+            <strong style="color:#2A333C">Rimborso: {_eur(refund_amount)}</strong><br/>
+            <span style="color:#5C6A79;font-size:13px">
+              Il rimborso è stato disposto sul metodo di pagamento originale; di solito compare
+              sull'estratto conto entro <strong>5-10 giorni lavorativi</strong>.
+            </span>
+          </td>
+        </tr>"""
+    elif refund_amount is not None:
         refund_row = """
         <tr style="border-top:1px solid #E5E0D8">
           <td colspan="2" style="padding:16px 0 4px 0">
             <strong style="color:#2A333C">Rimborso</strong><br/>
             <span style="color:#5C6A79;font-size:13px">
-              Il rimborso verrà accreditato entro
-              <strong>5 giorni lavorativi</strong> sul metodo di pagamento originale.
+              In base alle condizioni della tariffa scelta non è previsto alcun rimborso.
             </span>
           </td>
         </tr>"""

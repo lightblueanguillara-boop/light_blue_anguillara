@@ -1,5 +1,6 @@
 """Stripe payments: booking checkout, status polling, webhook, and cleanup."""
 import asyncio
+import html
 import logging
 import os
 from datetime import datetime, timezone, timedelta
@@ -65,14 +66,29 @@ async def _mark_paid(session_id: str, payment_intent: Optional[str]):
         return  # già gestito
 
     choice = (tx.get('metadata') or {}).get('payment_choice', 'deposit')
-    update = {
-        'status': 'confirmed',
-        'payment_status': 'fully_paid' if choice == 'full' else 'deposit_paid',
-    }
+    payment = {'payment_status': 'fully_paid' if choice == 'full' else 'deposit_paid'}
     if payment_intent:
-        update['payment_intent_id'] = payment_intent
-    r = await db.bookings.update_one({'id': tx['booking_id']}, {'$set': update})
+        payment['payment_intent_id'] = payment_intent
     settings = await get_settings()
+    current = await db.bookings.find_one({'id': tx['booking_id']}, {'_id': 0})
+
+    if current and not await _can_confirm(current):
+        # Prenotazione già chiusa (cancellata, rifiutata, o scaduta con date ormai occupate):
+        # NON va riattivata, altrimenti si rischia una doppia prenotazione. Registriamo il
+        # pagamento e avvisiamo subito il proprietario, che potrà rimborsare dal pannello.
+        await _record_payment_on_closed(current, payment, tx)
+        return
+
+    # conferma solo se nel frattempo lo stato non è cambiato (es. cancellata in quel momento)
+    query = {'id': tx['booking_id']}
+    if current:
+        query['status'] = current.get('status')
+    r = await db.bookings.update_one(query, {'$set': {'status': 'confirmed', **payment}})
+    if current and r.matched_count == 0:
+        latest = await db.bookings.find_one({'id': tx['booking_id']}, {'_id': 0})
+        if latest:
+            await _record_payment_on_closed(latest, payment, tx)
+            return
 
     if r.matched_count == 0:
         # Non dovrebbe più succedere, ma se succede il gestore DEVE saperlo subito.
@@ -95,6 +111,34 @@ async def _mark_paid(session_id: str, payment_intent: Optional[str]):
             f"Prenotazione confermata — {settings.get('villa_name', 'Light Blue')}",
             email_booking_confirmation_html(booking, settings),
             ref_url=f"/admin/bookings?open={booking['id']}",
+        ))
+
+
+async def _can_confirm(booking: dict) -> bool:
+    """Un pagamento può confermare la prenotazione solo se è ancora in attesa di pagamento,
+    oppure se è scaduta da poco e nel frattempo le date sono rimaste libere."""
+    status = booking.get('status')
+    if status in ('pending', 'awaiting_payment', 'confirmed'):
+        return True
+    if status == 'expired':
+        return await dates_available(booking['check_in'], booking['check_out'], exclude_id=booking['id'])
+    return False
+
+
+async def _record_payment_on_closed(booking: dict, payment: dict, tx: dict) -> None:
+    """Pagamento arrivato su una prenotazione chiusa: lo registra senza riattivarla e avvisa subito."""
+    await db.bookings.update_one({'id': booking['id']}, {'$set': {**payment, 'paid_while_closed': True}})
+    logging.critical(f"Pagamento ricevuto su prenotazione chiusa {booking['id']} (stato {booking.get('status')})")
+    await notify('payment_on_closed', booking=booking, amount=tx.get('amount'))
+    if ADMIN_NOTIFY_EMAIL:
+        asyncio.create_task(send_email_async(
+            ADMIN_NOTIFY_EMAIL,
+            '[Light Blue] ATTENZIONE: pagamento su prenotazione chiusa',
+            f"<p>{html.escape(booking.get('guest_name') or 'Un ospite')} ha pagato <b>{tx.get('amount')} €</b> "
+            f"per il soggiorno dal {booking.get('check_in')} al {booking.get('check_out')}, ma la prenotazione "
+            f"era già chiusa (stato: {html.escape(str(booking.get('status')))}).</p>"
+            "<p>La prenotazione <b>non</b> è stata riattivata. Aprila nel pannello e, se le date non sono più "
+            "disponibili, usa <i>Cancella e rimborsa</i>.</p>",
         ))
 
 

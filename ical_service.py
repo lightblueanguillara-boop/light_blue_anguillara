@@ -35,6 +35,14 @@ async def ical_sync_run():
                 continue
 
             cal = Calendar.from_ical(r.content)
+            if not any(c.name == 'VEVENT' for c in cal.walk()) and await _has_future_external(src):
+                # Calendario arrivato vuoto ma abbiamo ancora prenotazioni future da questa
+                # piattaforma: quasi sempre è un errore temporaneo di Airbnb/Booking. Non
+                # cancelliamo nulla (meglio una data bloccata in più che una doppia prenotazione):
+                # lo trattiamo come un download fallito, così dopo un'ora arriva l'avviso.
+                logging.warning(f"Calendario {src} vuoto ma con prenotazioni future: date mantenute")
+                errors.append(f"{src}: calendario vuoto, date mantenute per sicurezza")
+                continue
             synced_sources.append(src)
             for comp in cal.walk():
                 if comp.name == 'VEVENT':
@@ -121,6 +129,13 @@ async def ical_sync_run():
     
     logging.info(f"Sincronizzazione iCal completata: {imported} eventi, errori: {errors or 'nessuno'}")
     return {'imported': imported, 'errors': errors, 'at': datetime.now(timezone.utc).isoformat()}
+
+
+async def _has_future_external(src: str) -> bool:
+    """True se ci sono prenotazioni di questa piattaforma non ancora concluse."""
+    today = date.today().isoformat()
+    return await db.bookings.count_documents(
+        {'source': src, 'status': 'external', 'check_out': {'$gt': today}}, limit=1) > 0
 
 
 MAX_NOTIFY_PER_SYNC = 5

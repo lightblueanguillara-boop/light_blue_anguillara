@@ -162,7 +162,7 @@ async def reject_request(booking_id: str, payload: RejectRequest, admin=Depends(
     if b.get('status') == 'awaiting_payment':
         tx = await db.payment_transactions.find_one({'booking_id': b['id']}, {'_id': 0})
         if tx and await _expire_session(tx['session_id']) in ('complete', 'unknown'):
-            raise HTTPException(409, 'Il pagamento risulta completato o in corso: usa la cancellazione con rimborso')
+            raise HTTPException(409, 'Il pagamento risulta completato o in verifica: ricarica la pagina; se è stato pagato, usa "Cancella e rimborsa" dalla scheda della prenotazione')
 
     settings = await get_settings()
     update = {

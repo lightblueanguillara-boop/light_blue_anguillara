@@ -6,7 +6,8 @@ Tipi di notifica (decisi con il proprietario):
   B  Airbnb / Booking.com  6 nuova prenotazione, 7 prenotazione rimossa, 8 calendario non aggiornato
   C  messaggi              9 nuovo messaggio dal sito
   D  promemoria            10 arrivo domani (18:00), 11 partenza oggi (8:00)
-  E  sicurezza e problemi  12 pagamento da verificare, 13 email non consegnata, 14 nuovo accesso
+  E  sicurezza e problemi  12 pagamento da verificare, 13 email non consegnata, 14 nuovo accesso,
+                           15 pagamento su prenotazione chiusa (cancellata/rifiutata/scaduta)
 Regole: niente emoji o simboli nei testi; ogni notifica apre la pagina/scheda giusta;
 gruppo E sempre attivo; silenzio notturno (le urgenti 12 e 14 arrivano comunque).
 """
@@ -29,9 +30,9 @@ GROUP_OF = {
     'external_new': 'B', 'external_removed': 'B', 'ical_failing': 'B',
     'new_message': 'C',
     'arrival_tomorrow': 'D', 'departure_today': 'D',
-    'payment_orphan': 'E', 'email_failed': 'E', 'new_login': 'E',
+    'payment_orphan': 'E', 'email_failed': 'E', 'new_login': 'E', 'payment_on_closed': 'E',
 }
-URGENT = {'payment_orphan', 'new_login'}   # arrivano anche durante il silenzio notturno
+URGENT = {'payment_orphan', 'new_login', 'payment_on_closed'}   # arrivano anche durante il silenzio notturno
 
 # Servizi di notifica ammessi (evita che il server venga usato per chiamare indirizzi arbitrari)
 ALLOWED_PUSH_HOSTS = ('fcm.googleapis.com', 'updates.push.services.mozilla.com', 'push.apple.com',
@@ -177,6 +178,12 @@ def build(kind: str, ctx: dict) -> dict:
         return dict(title='Pagamento da verificare',
                     body=f"Stripe ha incassato {euro(ctx.get('amount'))} ma la prenotazione non risulta. Controlla subito su Stripe.",
                     discreet='Un pagamento richiede una verifica urgente.', url='/admin/bookings')
+    if kind == 'payment_on_closed':
+        b = ctx['booking']
+        return dict(title='Pagamento su prenotazione chiusa',
+                    body=f"{nome(b)} ha pagato {euro(ctx.get('amount'))} per {periodo(b['check_in'], b['check_out'])}, "
+                         "ma la prenotazione era chiusa. Non è stata riattivata: verifica e rimborsa.",
+                    discreet='Un pagamento richiede una verifica urgente.', url=booking_url(b['id']))
     if kind == 'email_failed':
         return dict(title='Email non consegnata',
                     body=f"Non sono riuscito a inviare l'email \"{ctx.get('subject', '')[:60]}\" a {ctx.get('to')}: contatta l'ospite.",
