@@ -262,6 +262,7 @@ class VillaSettings(BaseModel):
     legal_owner_tax_id: str = ''
     legal_owner_address: str = ''
     tourist_tax_note: str = ''
+    backup_email_frequency: str = 'weekly'   # backup automatico per email: daily | weekly | off
 
 # Usato da operations.py per aggiornare le impostazioni globali della villa
 class SettingsUpdate(BaseModel):
@@ -295,6 +296,7 @@ class SettingsUpdate(BaseModel):
     legal_owner_tax_id: Optional[str] = Field(default=None, max_length=40)
     legal_owner_address: Optional[str] = Field(default=None, max_length=300)
     tourist_tax_note: Optional[str] = Field(default=None, max_length=1000)
+    backup_email_frequency: Optional[str] = Field(default=None, pattern=r'^(daily|weekly|off)$')
 
 class GalleryImage(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))

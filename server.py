@@ -26,6 +26,7 @@ from routers.payments import router as payments_router, cleanup_expired_bookings
 from routers.booking_requests import router as requests_router, expire_requests  # noqa: E402
 from routers.brand import router as brand_router  # noqa: E402
 from notifications import run_scheduled  # noqa: E402
+from backup import run_scheduled_backup  # noqa: E402
 from routers.public import router as public_router  # noqa: E402
 
 logging.basicConfig(
@@ -128,13 +129,14 @@ async def _ical_scheduler_loop():
 
 
 async def _cleanup_scheduler_loop():
-    """Ogni 5 minuti: rimuove i checkout abbandonati e chiude le richieste scadute."""
+    """Ogni 5 minuti: checkout abbandonati, richieste scadute, notifiche programmate, backup automatico."""
     await asyncio.sleep(60)  # attesa iniziale
     while True:
         try:
             await cleanup_expired_bookings()
             await expire_requests()
             await run_scheduled()
+            await run_scheduled_backup()
         except Exception as e:
             logging.exception(f'Cleanup scheduler failed: {e}')
         await asyncio.sleep(5 * 60)  # ogni 5 minuti

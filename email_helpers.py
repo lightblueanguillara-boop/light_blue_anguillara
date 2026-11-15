@@ -104,11 +104,13 @@ def is_placeholder_email(email: Optional[str]) -> bool:
 
 
 async def send_email_async(to_email: str, subject: str, html_body: str, headers: Optional[dict] = None,
-                           ref_url: Optional[str] = None) -> bool:
+                           ref_url: Optional[str] = None, attachments: Optional[list] = None) -> bool:
     try:
         params = {'from': SENDER_EMAIL, 'to': [to_email], 'subject': subject, 'html': html_body}
         if headers:
             params['headers'] = headers
+        if attachments:
+            params['attachments'] = attachments
         await asyncio.to_thread(resend.Emails.send, params)
         return True
     except Exception as e:
